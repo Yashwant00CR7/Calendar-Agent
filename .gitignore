@@ -1,0 +1,6 @@
+calendar-ai
+\__pycache__
+.env
+\session.txt
+\token.json
+\credentials.json
