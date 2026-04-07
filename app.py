@@ -23,24 +23,35 @@ async def route_intent(query: str) -> str:
     )
     return response.text.strip()
 
-async def main():
-    print("Initiating fully autonomous Calendar Agent Pipeline...")
-    query = input("Enter the objective you want to add to your calendar: ")
-    
-    print("🤖 Director analyzing intent...")
+async def execute_agent(query: str) -> str:
+    """Executes the agent pipeline programmatically and stringifies the AI response."""
+    print(f"🤖 Director analyzing intent for: '{query}'")
     route = await route_intent(query)
     print(f"🚦 Routing to: {route}\n")
     
     if "SEARCH" in route:
-        # Use the full SequntialAgent pipeline (Search -> Parse -> Calendar)
-        response = await runner.run_debug(query)
+        # Use the full SequentialAgent pipeline
+        events = await runner.run_debug(query)
     else:
         # Bypass Search/Parse and hit the Calendar agent directly
         calendar_runner = InMemoryRunner(agent=calendar_agent)
-        response = await calendar_runner.run_debug(query)
+        events = await calendar_runner.run_debug(query)
 
+    # Extract the final text response from the ADK Event list
+    for event in reversed(events):
+        if event.content and event.content.role == 'model':
+            for part in event.content.parts:
+                if part.text:
+                    return part.text.strip()
+                    
+    return "Action completed successfully (No direct text output)."
+
+async def main():
+    print("Initiating fully autonomous Calendar Agent Pipeline...")
+    query = input("Enter the objective you want to add to your calendar: ")
+    response_text = await execute_agent(query)
     print("\n--- Final Agent Response ---")
-    print(response)
+    print(response_text)
 
 if __name__ == "__main__":
     asyncio.run(main())
