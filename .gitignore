@@ -1,6 +1,13 @@
 calendar-ai
-\__pycache__
+**/__pycache__
 .env
-\session.txt
-\token.json
-\credentials.json
+session.txt
+token.json
+credentials.json
+android_client.json
+web_client.json
+users.db
+calendar_agent_app
+*.pyc
+.vscode/
+.idea/

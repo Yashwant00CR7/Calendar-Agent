@@ -1,119 +1,31 @@
 import os
-import asyncio
 import certifi
 import datetime
 from dotenv import load_dotenv
 
+# Note: IPv4 force-patch is now handled globally in server.py
 os.environ["SSL_CERT_FILE"] = certifi.where()
 
 from google.adk.agents import Agent
-from google.adk.agents.sequential_agent import SequentialAgent
 from google.adk.models.google_llm import Gemini
-from google.adk.runners import InMemoryRunner
 from google.adk.tools import google_search
 from google.genai import types
 
 from calendar_utils.calendar_service import get_calendar_service
 from calendar_utils.event_manager import build_event, create_event_if_not_exists, delete_event_by_id, list_upcoming_events
 
-
 load_dotenv()
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-if GOOGLE_API_KEY:
-    os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
-    print("✅ Gemini API key setup complete.")
-else:
-    print("🔑 Authentication Error: GOOGLE_API_KEY not found in .env file.")
+"""Use on Api key issue"""
+# if "GOOGLE_API_KEY" in os.environ:
+#     del os.environ["GOOGLE_API_KEY"]
 
-
-retry_config=types.HttpRetryOptions(
-    attempts=5,  # Maximum retry attempts
-    exp_base=7,  # Delay multiplier
-    initial_delay=1, # Initial delay before first retry (in seconds)
-    http_status_codes=[429, 500, 503, 504] # Retry on these HTTP errors
+retry_config = types.HttpRetryOptions(
+    attempts=5,
+    exp_base=7,
+    initial_delay=1,
+    http_status_codes=[429, 500, 503, 504]
 )
-
-
-search_agent = Agent(
-    name="search_agent",
-
-    model=Gemini(
-        model="gemini-2.5-flash",
-        retry_options=retry_config
-    ),
-
-    description="Searches the web for event-related information.",
-
-    instruction="The current date and time is: " + datetime.datetime.now().strftime("%Y-%m-%d %A %H:%M:%S") + "\n\n" + """
-    You are a search agent.
-    
-    Your ONLY job is to:
-    - Use Google Search to find information about events.
-    - Return raw, detailed results.
-    
-    Do NOT:
-    - Summarize too much
-    - Do NOT structure into JSON
-    - Do NOT create calendar format
-    
-    Just return clear, readable event-related information including:
-    - Event name
-    - Date
-    - Time
-    - Location
-    - Description (if available)
-    
-    If multiple events are found, list all of them clearly.
-    """,
-
-    tools=[google_search],
-)
-
-
-parser_agent = Agent(
-    name="parser_agent",
-
-    model=Gemini(
-        model="gemini-2.5-flash",
-        retry_options=retry_config
-    ),
-
-    description="Parses raw event text into calendar-ready JSON.",
-
-    instruction="The current date and time is: " + datetime.datetime.now().strftime("%Y-%m-%d %A %H:%M:%S") + "\n\n" + """
-You are a data parser.
-
-Convert the given event text into structured JSON.
-
-Extract the following fields:
-- summary (e.g., "RCB vs CSK")
-- location
-- start (ISO format WITH timezone: YYYY-MM-DDTHH:MM:SS+05:30)
-- end (ISO format WITH timezone: YYYY-MM-DDTHH:MM:SS+05:30)
-- description (default: "IPL Match" if not provided)
-
-Rules:
-- Return ONLY valid JSON
-- If multiple events exist, return a LIST of JSON objects
-- Use timezone: +05:30 (IST)
-- Use 24-hour format
-- If end time is missing, assume 4 hours duration
-- Do NOT include explanations or extra text
-
-Example Output:
-[
-  {
-    "summary": "RCB vs KKR",
-    "start": "2026-04-12T15:30:00+05:30",
-    "end": "2026-04-12T19:30:00+05:30",
-    "location": "Kolkata",
-    "description": "IPL Match"
-  }
-]
-"""
-)
-
 
 COLOR_MAP = {
     "lavender": "1", "sage": "2", "grape": "3", "flamingo": "4", "banana": "5",
@@ -122,88 +34,129 @@ COLOR_MAP = {
     "yellow": "5", "orange": "6", "purple": "3"
 }
 
-def schedule_event_tool(summary: str, start: str, end: str, location: str = "", description: str = "", color_name: str = None, attendee_emails: list[str] = None) -> str:
-    """Tool for the AI to schedule an event. Can accept 'color_name' (e.g. 'red', 'blue', 'green', 'lavender', 'grape', 'tomato', 'blueberry') and 'attendee_emails' (a list of email strings)."""
-    service = get_calendar_service()
-    
-    color_id = COLOR_MAP.get(color_name.lower()) if color_name else None
-    event_body = build_event(summary, start, end, location, description, color_id, attendee_emails)
-    result = create_event_if_not_exists(service, event_body)
-    
-    if result["status"] == "created":
-        return f"Successfully created event: {summary}. Link: {result.get('link')}"
-    elif result["status"] == "duplicate":
-        return f"Event already exists: {summary}."
-    else:
-        return f"Failed to create event {summary}: {result.get('message')}"
+def create_user_agents(api_key: str, google_token: str):
+    """
+    Factory function that creates specialized agents using gemini-2.5-flash-lite.
+    """
+    # --- FORCE-INJECT API KEY ---
+    # This ensures the library picks up the DB key even if .env has a different one.
+    if api_key:
+        os.environ["GOOGLE_API_KEY"] = api_key.strip()
+    # ----------------------------
 
-def list_upcoming_events_tool() -> str:
-    """Tool for the AI to fetch and read upcoming events on the user's Google Calendar. Returns a list of event IDs, summaries, and times."""
-    service = get_calendar_service()
-    try:
-        events = list_upcoming_events(service, 10)
-        if not events:
-            return "No upcoming events found."
+    # DIAGNOSTIC
+    fp = f"{api_key[:4]}...{api_key[-4:]}" if api_key and len(api_key) > 8 else "INVALID"
+    print(f"🛠️ [FACTORY] Building agents with Key: {fp} (Len: {len(api_key) if api_key else 0})")
+    
+    # --- Locally-scoped Tools (Closures) ---
+    def schedule_event_tool(summary: str, start: str, end: str, location: str = "", description: str = "", color_name: str = None, attendee_emails: list[str] = None) -> str:
+        """Schedules a new event in the Google Calendar."""
+        print(f"🎯 TOOL START: schedule_event_tool for '{summary}'")
         
-        output = "Upcoming Events:\n"
-        for idx, event in enumerate(events):
-            start = event.get('start', {}).get('dateTime', event.get('start', {}).get('date'))
-            output += f"ID: {event['id']} | Summary: '{event.get('summary', 'No Title')}' | Start: {start}\n"
-        return output
-    except Exception as e:
-        return f"Failed to list events: {str(e)}"
+        print("🔐 STEP 1: Building Google Calendar Service...")
+        service = get_calendar_service(google_token)
+        if not service:
+            print("❌ ERROR: Service build failed.")
+            return "Error: Google Calendar not linked. Please link your account in settings."
+        print("✅ STEP 2: Service built successfully.")
+        
+        color_id = COLOR_MAP.get(color_name.lower()) if color_name else None
+        
+        # Filter out invalid emails (must contain '@' and '.')
+        valid_attendees = []
+        if attendee_emails:
+            valid_attendees = [email for email in attendee_emails if "@" in email and "." in email]
+            if len(valid_attendees) < len(attendee_emails):
+                print(f"⚠️ Filtered out invalid emails: {set(attendee_emails) - set(valid_attendees)}")
 
-def delete_event_tool(event_id: str) -> str:
-    """Tool for the AI to delete an event from Google Calendar using its precise event_id."""
-    service = get_calendar_service()
-    try:
-        success = delete_event_by_id(service, event_id)
-        if success:
-            return f"Successfully deleted event with ID: {event_id}."
+        event_body = build_event(summary, start, end, location, description, color_id, valid_attendees)
+        
+        print(f"📡 STEP 3: Sending 'create' request to Google API ({start})...")
+        result = create_event_if_not_exists(service, event_body)
+        print("🏁 TOOL END: Request completed.")
+        
+        if result["status"] == "created":
+            return f"Successfully created event: {summary}. Link: {result.get('link')}"
+        elif result["status"] == "duplicate":
+            return f"Event already exists: {summary}."
         else:
-            return f"Failed to delete event with ID: {event_id}."
-    except Exception as e:
-        return f"Failed to delete event: {str(e)}"
+            return f"Failed to create event {summary}: {result.get('message')}"
 
-calendar_agent = Agent(
-    name="calendar_agent",
-    model=Gemini(
-        model="gemini-2.5-flash",
-        retry_options=retry_config
-    ),
-    description="Schedules events into Google Calendar",
-    instruction="The current date and time is: " + datetime.datetime.now().strftime("%Y-%m-%d %A %H:%M:%S") + "\n\n" + """
-You are a calendar execution agent.
-You will receive a list of parsed events or direct user commands.
-Your job is to read instructions and accurately use the `schedule_event_tool` to schedule events, or the `delete_event_tool` to delete events.
+    def list_upcoming_events_tool() -> str:
+        """Lists the user's upcoming 10 calendar events."""
+        print("🎯 TOOL START: list_upcoming_events_tool")
+        service = get_calendar_service(google_token)
+        if not service: return "Error: Google Calendar not linked."
+        
+        try:
+            print("📡 STEP 1: Fetching events from Google...")
+            events = list_upcoming_events(service, 10)
+            print("✅ STEP 2: Events retrieved.")
+            if not events:
+                return "No upcoming events found."
+            output = "Upcoming Events:\n"
+            for event in events:
+                start = event.get('start', {}).get('dateTime', event.get('start', {}).get('date'))
+                output += f"ID: {event['id']} | Summary: '{event.get('summary', 'No Title')}' | Start: {start}\n"
+            return output
+        except Exception as e:
+            return f"Failed to list events: {str(e)}"
 
-For `schedule_event_tool`, you can also specify a `color_name` (like 'red', 'blue', 'green') and invite guests by providing a list of `attendee_emails` if requested.
+    def delete_event_tool(event_id: str) -> str:
+        """Deletes a specific event from the calendar using its ID."""
+        print(f"🎯 TOOL START: delete_event_tool for ID: {event_id}")
+        service = get_calendar_service(google_token)
+        if not service: return "Error: Google Calendar not linked."
+            
+        try:
+            print(f"📡 STEP 1: Sending 'delete' request for {event_id}...")
+            success = delete_event_by_id(service, event_id)
+            print("🏁 TOOL END: Delete request finished.")
+            if success:
+                return f"Successfully deleted event with ID: {event_id}."
+            else:
+                return f"Failed to delete event with ID: {event_id}."
+        except Exception as e:
+            return f"Failed to delete event: {str(e)}"
 
-ALWAYS use the `list_upcoming_events_tool` FIRST if you are asked to delete or modify an event. 
-By pulling the list of events, you can find the actual `event_id` and Exact Summary to ensure you don't delete the wrong item! Then use `delete_event_tool` with that `event_id`.
+    # --- Agent Definitions ---
+    # Using 'flash-lite' throughout to save quota and increase reliability
 
-Do NOT skip any actions.
-Return a clear summary of what you did.
-""",
-    tools=[schedule_event_tool, delete_event_tool, list_upcoming_events_tool]
-)
-
-information_agent=SequentialAgent(
-    name="information_agent",
-    sub_agents=[search_agent, parser_agent, calendar_agent]
-)
-
-runner = InMemoryRunner(agent=information_agent)
-
-print("✅ Runner created.")
-
-
-async def main():
-    response = await runner.run_debug(
-        "Can you list all the upcoming RCB matches in this ipl edition"
+    information_agent = Agent(
+        name="information_agent",
+        model=Gemini(model="gemini-2.5-flash-lite", api_key=api_key, retry_options=retry_config),
+        description="Gathers information from the web about upcoming events or user queries.",
+        instruction="""
+        You are a search specialist. 
+        If the user query requires current info or web lookup, use 'google_search'.
+        Return the findings clearly.
+        """,
+        tools=[google_search]
     )
-    print(response)
 
+    calendar_agent = Agent(
+        name="calendar_agent",
+        model=Gemini(model="gemini-2.5-flash-lite", api_key=api_key, retry_options=retry_config),
+        description="Manages the user's Google Calendar.",
+        instruction="""
+        You are a proactive calendar assistant. 
+        Your primary goal is to execute user requests with MINIMUM questions.
+        
+        PROACTIVE ID HUNTING:
+        - If the user wants to DELETE, UPDATE, or MODIFY an event but doesn't provide the Event ID, you MUST call `list_upcoming_events_tool` immediately to find it yourself.
+        - SEARCH the output of `list_upcoming_events_tool` for the event matching the user's description.
+        - Once you find the ID, proceed to call the specific action tool (e.g., delete_event_tool).
+        - NEVER ask the user "What is the event ID?" if you can find it yourself.
+        
+        STRICT EXECUTION:
+        - Do not output preamble BEFORE the tool call.
+        - **MANDATORY**: After calling a tool (schedule, list, or delete), you MUST provide a closing summary message to the user confirming exactly what was done (e.g. "Meeting with Pradeesh has been scheduled for tomorrow at 3 PM.").
+        - Do not finish in silence.
+        """,
+        tools=[schedule_event_tool, list_upcoming_events_tool, delete_event_tool]
+    )
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    return {
+        "information_agent": information_agent,
+        "calendar_agent": calendar_agent
+    }

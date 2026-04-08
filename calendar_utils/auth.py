@@ -13,8 +13,13 @@ def get_credentials():
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+            except Exception:
+                # If refresh fails (token revoked/expired), fall back to fresh login
+                creds = None
+
+        if not creds:
             flow = InstalledAppFlow.from_client_secrets_file(
                 "credentials.json",
                 SCOPES
