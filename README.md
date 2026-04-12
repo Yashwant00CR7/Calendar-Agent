@@ -1,133 +1,92 @@
-# Calendar AI Agent
+<h1 align="center">
+  <br>
+  <img src="https://upload.wikimedia.org/wikipedia/commons/a/a5/Google_Calendar_icon_%282020%29.svg" alt="Calendar AI" width="100">
+  <br>
+  Calendar AI: The Serverless Agentic Scheduler
+  <br>
+</h1>
 
-A smart calendar automation system built with Google ADK (Agent Development Kit) that can search for events on the web and add them directly to your Google Calendar.
+<h4 align="center">A 100% on-device, privacy-first AI agent that manages your Google Calendar natively using Gemini 2.5 Flash.</h4>
 
-## Features
+<p align="center">
+  <a href="#key-features">Key Features</a> •
+  <a href="#how-it-works">How It Works</a> •
+  <a href="#privacy--security">Privacy</a> •
+  <a href="#quick-start">Quick Start</a>
+</p>
 
-- 🔍 **Event Discovery**: Search the web for sports events, concerts, conferences, and more
-- 📅 **Calendar Integration**: Automatically add events to Google Calendar with duplicate detection
-- ✅ **User Approval**: Review and approve events before they're added to your calendar
-- 🗣️ **Interactive CLI**: Chat-like interface for natural conversation
-- 🔒 **Secure OAuth2**: Secure authentication with Google Calendar API
+---
 
-## Installation
+## 🚀 Overview
 
-1. Install dependencies:
+**Calendar AI** is a fully serverless Flutter application that allows users to converse naturally with an AI to manage their schedules. 
+
+Instead of relying on an expensive cloud backend to process API requests, this app utilizes local device resources and the `google_generative_ai` Dart package to orchestrate **Gemini 2.5 Flash Lite**. All reasoning, intent routing, tool-calling, and Google OAuth exchanges happen securely on the user's phone.
+
+## ✨ Key Features
+
+- **Hybrid Agent Architecture ("Synchronized Twins")**: Employs an internal invisible router to pass user queries to either a *Search Agent* (for general knowledge) or a *Calendar Agent* (for CRUD operations), bypassing Gemini's tool-collision limits.
+- **Persistent Local Memory**: Maintains a sliding 5-turn conversation history locally (`SharedPreferences`). The AI implicitly remembers dates, locations, and context discussed in previous messages without requiring you to repeat yourself.
+- **Proactive ID Hunting**: You don't need to know event IDs to cancel/modify meetings. The AI automatically queries your calendar in the background to find matching events before executing a deletion.
+- **Zero-Backend Infrastructure**: You can compile this app and distribute the APK immediately. **No Python servers, no databases, no hosting fees.**
+
+## 🛡️ Privacy & Security (Zero Liability)
+
+Handling other people's calendars and API keys is a legal minefield. **Calendar AI handles this perfectly:**
+
+| Data Component | Where it Lives | Who Can Access |
+|---|---|---|
+| **Gemini API Key** | App's Secure Keystore (`flutter_secure_storage`) | **Only the User** |
+| **Google Calendar Token** | Android/iOS System Vault (`google_sign_in`) | **Only the User** |
+| **Chat History** | Local Preferences Cache | **Only the User** |
+
+*All data traverses directly between the phone and Google's servers. Nothing is ever sent to a developer-owned backend.*
+
+## ⚙️ How It Works (The Agent Loop)
+
+1. **Intent Routing**: The `AgentService` uses a lightweight prompt to determine if the query requires Google Search grounding or Calendar actions.
+2. **Context Injection**: The last 5 messages are retrieved from local storage and injected as `PEER HISTORY`.
+3. **Function Calling**: If the query is Calendar-related, the model receives Dart `FunctionDeclarations` (Tools) for:
+   - `schedule_event_tool`
+   - `list_upcoming_events_tool`
+   - `delete_event_tool`
+4. **Execution**: The Flutter app executes the requested tool natively via the `googleapis` package and returns the JSON result directly to the model.
+
+## 🛠️ Quick Start
+
+### Prerequisites
+- [Flutter SDK](https://flutter.dev/docs/get-started/install) (Version 3.24+ recommended)
+- Android Studio or Xcode (for emulation/compilation)
+
+### Build & Run
 ```bash
-pip install -r requirements.txt
+# 1. Clone the repository
+git clone https://github.com/your-username/Calendar-Agent.git
+cd Calendar-Agent/calendar_agent_app
+
+# 2. Get Dart dependencies
+flutter pub get
+
+# 3. Connect a device or start an emulator, then run:
+flutter run
 ```
 
-2. Set up Google API credentials:
-   - Go to [Google Cloud Console](https://console.cloud.google.com/)
-   - Create a project and enable the Google Calendar API
-   - Create OAuth 2.0 credentials (Desktop app)
-   - Download the credentials.json file to the project root
+### In-App Setup (For Users)
+1. Open the app and click the **Gear Icon ⚙️** at the top right.
+2. Paste your free Gemini API Key (get it from [Google AI Studio](https://aistudio.google.com/)).
+3. Click **"Link Google Calendar"** to authorize the app.
+4. Start scheduling!
 
-3. Set your Google API Key in `.env`:
-```env
-GOOGLE_API_KEY=your_api_key_here
-```
+## 📦 Building for Release (APK)
 
-## Usage
+To build a standalone APK that you can send to friends or upload as a GitHub Release:
 
-### Interactive CLI
-
-Run the interactive chat interface:
 ```bash
-python app.py
+cd calendar_agent_app
+flutter build apk --release
 ```
+Your compiled app will be located at:
+`calendar_agent_app/build/app/outputs/flutter-apk/app-release.apk`
 
-Example conversations:
-```
-You: Find upcoming IPL matches
-Assistant: Found 3 matches:
-1. RCB vs MI
-   Date: 2026-04-03
-   Time: 19:30
-   Venue: Bengaluru
-   Description: IPL match
-
-Would you like me to add these 3 events to your Google Calendar? [y/n]
-> y
-Successfully added 3 events to your calendar!
-
-You: Show my upcoming events
-Assistant: Here are your next 5 events:
-- Team Meeting - Tomorrow at 10:00 AM
-- IPL Match - April 3 at 7:30 PM
-```
-
-### Programmatic Usage
-
-```python
-from google.adk.runners import InMemoryRunner
-from my_calendar_agent.agent import root_agent
-
-runner = InMemoryRunner(agent=root_agent)
-events = await runner.run_async(
-    user_id="user123",
-    session_id="session456",
-    new_message="Find concerts in Mumbai this month"
-)
-```
-
-## Architecture
-
-### Agents
-
-1. **Search Agent**: Searches the web for event information using Google Search
-2. **Root Agent**: Orchestrates the workflow and coordinates with calendar tools
-
-### Tools
-
-- `normalize_events_for_calendar`: Converts raw event data to Google Calendar format
-- `create_calendar_events`: Adds events to Google Calendar with duplicate detection
-- `show_upcoming_calendar_events`: Lists upcoming events from the calendar
-- `event_approval_tool`: Shows events and gets user confirmation
-
-### Data Flow
-
-1. User requests event search
-2. Search agent finds events on the web
-3. Events are normalized into calendar format
-4. User approves events
-5. Events are added to Google Calendar
-
-## Configuration
-
-### Environment Variables
-
-Create a `.env` file:
-```env
-GOOGLE_API_KEY=your_api_key_here
-GOOGLE_CLIENT_ID=your_client_id
-GOOGLE_CLIENT_SECRET=your_client_secret
-```
-
-### Agent Configuration
-
-You can customize agent behavior by modifying:
-
-- `model`: Change the LLM model (default: gemini-2.0-flash)
-- `instruction`: Modify the agent's behavior instructions
-- `tools`: Add or remove tools as needed
-
-## Error Handling
-
-The system includes robust error handling for:
-- Invalid JSON responses from search
-- Calendar API errors
-- Authentication issues
-- Network problems
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
-
-## License
-
-This project is licensed under the MIT License.
+---
+*Built with Flutter & Gemini Generative AI Tool Calling.*
