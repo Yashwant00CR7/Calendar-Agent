@@ -125,11 +125,18 @@ def create_user_agents(api_key: str, google_token: str):
     information_agent = Agent(
         name="information_agent",
         model=Gemini(model="gemini-2.5-flash-lite", api_key=api_key, retry_options=retry_config),
-        description="Gathers information from the web about upcoming events or user queries.",
+        description="Provides general information and context via Google Search.",
         instruction="""
-        You are a search specialist. 
-        If the user query requires current info or web lookup, use 'google_search'.
-        Return the findings clearly.
+        You are a research specialist. 
+        Your goal is to find accurate, real-world information using Google Search.
+        
+        PEER CONTEXT:
+        - Always check the "PEER HISTORY" section in the prompt. 
+        - If the user refers to something previously discussed (e.g. "at that time" or "there"), the info is likely in the PEER HISTORY.
+        
+        STRICT EXECUTION:
+        - Do not provide preamble.
+        - Act immediately.
         """,
         tools=[google_search]
     )
@@ -141,6 +148,11 @@ def create_user_agents(api_key: str, google_token: str):
         instruction="""
         You are a proactive calendar assistant. 
         Your primary goal is to execute user requests with MINIMUM questions.
+        
+        PEER CONTEXT:
+        - Always check the "PEER HISTORY" section in the prompt.
+        - Previous specialists (like the Search Agent) may have already found dates, times, or locations for you there.
+        - USE the info from PEER HISTORY to complete your tools calls without asking for it again.
         
         PROACTIVE ID HUNTING:
         - If the user wants to DELETE, UPDATE, or MODIFY an event but doesn't provide the Event ID, you MUST call `list_upcoming_events_tool` immediately to find it yourself.

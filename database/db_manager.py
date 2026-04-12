@@ -33,9 +33,10 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT UNIQUE NOT NULL,
-            hashed_password TEXT NOT NULL,
+            hashed_password TEXT, -- Optional for Google-only users
             api_key TEXT,
-            google_token TEXT
+            google_token TEXT,
+            chat_history TEXT -- Stores JSON-encoded sliding window of turns
         )
     """)
     conn.commit()
@@ -74,6 +75,34 @@ def authenticate_user(email: str, password: str):
         return {"email": email, "api_key": user[1]}
     return None
 
+def get_or_create_google_user(email: str):
+    """
+    Finds a user by email or creates a new password-less one.
+    Used for 1-click Google Sign-In.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # 1. Try to find the user
+    cursor.execute("SELECT api_key FROM users WHERE email = ?", (email,))
+    user = cursor.fetchone()
+    
+    if user:
+        conn.close()
+        return {"email": email, "api_key": user[0], "is_new": False}
+    
+    # 2. If doesn't exist, create a new one (password-less)
+    # Use empty string instead of NULL to satisfy legacy NOT NULL constraint
+    try:
+        cursor.execute("INSERT INTO users (email, hashed_password) VALUES (?, '')", (email,))
+        conn.commit()
+        conn.close()
+        return {"email": email, "api_key": None, "is_new": True}
+    except sqlite3.IntegrityError:
+        # Race condition: another request created the user first — just fetch them
+        conn.close()
+        return {"email": email, "api_key": None, "is_new": False}
+
 def update_user_api_key(email: str, api_key: str):
     """Updates a user's Gemini API key."""
     conn = sqlite3.connect(DB_PATH)
@@ -105,10 +134,42 @@ def migrate_db():
         conn.commit()
         print("✅ google_token column added.")
         
+    if "chat_history" not in columns:
+        print("Adding chat_history column to users table...")
+        cursor.execute("ALTER TABLE users ADD COLUMN chat_history TEXT")
+        conn.commit()
+        print("✅ chat_history column added.")
+
     conn.close()
+
+def get_chat_history(email: str):
+    """Fetches the JSON-encoded chat history for a user."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT chat_history FROM users WHERE email = ?", (email,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def update_chat_history(email: str, history_json: str):
+    """Updates the persistent chat history."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET chat_history = ? WHERE email = ?", (history_json, email))
+    conn.commit()
+    conn.close()
+
+def update_table_schema_for_passwords():
+    """
+    SQLite doesn't support ALTER TABLE DROP NOT NULL easily.
+    Since we're early stage, we'll just ensure the code handles NULL correctly.
+    New users will have NULL passwords.
+    """
+    pass # Schema already handled in init_db for new installs.
 
 # Initialize on import
 if not os.path.exists(DB_PATH):
     init_db()
 else:
     migrate_db()
+    update_table_schema_for_passwords()

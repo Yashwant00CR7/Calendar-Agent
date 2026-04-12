@@ -1,6 +1,8 @@
 import os
 import asyncio
 import socket
+import json
+from datetime import datetime
 from dotenv import load_dotenv
 
 # --- GLOBAL IPv4 FORCE-PATCH ---
@@ -13,6 +15,7 @@ socket.getaddrinfo = _new_getaddrinfo
 
 from google.genai import Client
 from google.genai.errors import ClientError
+from database.db_manager import get_chat_history, update_chat_history
 
 from my_calendar_agent.agent import create_user_agents
 from google.adk.runners import Runner
@@ -131,10 +134,22 @@ async def execute_agent(query: str, email: str, api_key: str) -> str:
     # 3. Choose the active runner
     active_runner = info_runner if "SEARCH" in route else calendar_runner
 
-    # 4. Inject Current Date Context
-    import datetime
-    now_context = datetime.datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
-    enriched_query = f"Context: Today is {now_context}\n\nUser: {query}"
+    # 4. Fetch & Build History Context (Sliding Window of 5 turns)
+    raw_history = get_chat_history(email)
+    history_list = json.loads(raw_history) if raw_history else []
+    
+    # Format history for the prompt
+    history_block = ""
+    if history_list:
+        history_block = "\nPEER HISTORY (Previous turn context):\n"
+        for turn in history_list:
+            history_block += f"User: {turn['user']}\nAI: {turn['ai']}\n\n"
+
+    # BUILD ENRICHED QUERY
+    now_context = datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
+    enriched_query = f"Context: Today is {now_context}\n{history_block}\nCURRENT TASK:\n{query}"
+    
+    print(f"🧬 [MEMORY] Injecting {len(history_list)} turns of context...")
 
     # 5. Execute with 120s SAFETY TIMEOUT (Action + Summary take time)
     try:
@@ -152,7 +167,7 @@ async def execute_agent(query: str, email: str, api_key: str) -> str:
                 if event.content and event.content.parts:
                     for part in event.content.parts:
                         # DEBUG: See what the model is actually sending (tool calls, thoughts, etc.)
-                        print(f"🤖 [DEBUG] Part ({event.content.role}): {part}")
+                        # print(f"🤖 [DEBUG] Part ({event.content.role}): {part}")
                         
                         try:
                             if hasattr(part, 'text') and part.text:
@@ -160,14 +175,20 @@ async def execute_agent(query: str, email: str, api_key: str) -> str:
                         except:
                             continue
         
-        if full_response.strip():
-            # Update routing history for next turn
-            session["routing_history"] += f"User: {query}\nAgent: {full_response}\n"
-            # Keep the last 2000 chars of history for better context awareness
-            session["routing_history"] = session["routing_history"][-2000:]
-            return full_response.strip()
-        else:
-            return "Task completed successfully."
+        final_answer = full_response.strip() if full_response.strip() else "Task completed successfully."
+
+        # 4. Update Persistent History (Rotate sliding window)
+        history_list.append({"user": query, "ai": final_answer})
+        if len(history_list) > 5:
+            history_list.pop(0) # Maintain 5-turn window
+            
+        update_chat_history(email, json.dumps(history_list))
+        
+        # Update routing history for next turn
+        session["routing_history"] += f"User: {query}\nAgent: {final_answer}\n"
+        # Keep the last 2000 chars of history for better context awareness
+        session["routing_history"] = session["routing_history"][-2000:]
+        return final_answer
                         
     except asyncio.TimeoutError:
         return "The AI is taking a bit too long. Please try again."

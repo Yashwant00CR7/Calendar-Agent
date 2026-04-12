@@ -32,7 +32,7 @@ def check_google_connectivity():
 check_google_connectivity()
 
 from app import execute_agent
-from database.db_manager import create_user, authenticate_user, update_user_api_key
+from database.db_manager import get_or_create_google_user, update_user_api_key
 
 app = FastAPI(
     title="Calendar AI Agentic Service",
@@ -47,14 +47,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class UserSignup(BaseModel):
+class GoogleLogin(BaseModel):
     email: str
-    password: str
-    apiKey: str = ""
-
-class UserLogin(BaseModel):
-    email: str
-    password: str
+    authCode: str = None  # Optional: sent on first sign-in to get calendar token
 
 class UpdateApiKey(BaseModel):
     email: str
@@ -71,19 +66,67 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
 
-@app.post("/signup")
-async def signup_endpoint(user: UserSignup):
-    success = create_user(user.email, user.password, user.apiKey)
-    if success:
-        return {"status": "success", "message": "User registered successfully."}
-    return {"status": "error", "message": "User already exists."}
-
-@app.post("/login")
-async def login_endpoint(user: UserLogin):
-    authenticated = authenticate_user(user.email, user.password)
-    if authenticated:
-        return {"status": "success", "email": authenticated["email"], "apiKey": authenticated["api_key"]}
-    return {"status": "error", "message": "Invalid email or password."}
+@app.post("/google-login")
+async def google_login_endpoint(user: GoogleLogin):
+    from database.db_manager import update_user_google_token
+    import sqlite3
+    
+    # 1. Get or create the user
+    result = get_or_create_google_user(user.email)
+    
+    # 2. Check if user already has a valid calendar token
+    conn = sqlite3.connect("users.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT google_token FROM users WHERE email = ?", (user.email,))
+    row = cursor.fetchone()
+    conn.close()
+    has_token = row and row[0] and len(row[0]) > 10
+    
+    # 3. If authCode provided AND user doesn't already have a token, exchange it
+    if user.authCode and not has_token:
+        try:
+            from google_auth_oauthlib.flow import Flow
+            import os
+            from dotenv import load_dotenv
+            load_dotenv()
+            
+            CLIENT_CONFIG = {
+                "web": {
+                    "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
+                    "project_id": os.getenv("GOOGLE_PROJECT_ID", ""),
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                    "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
+                }
+            }
+            os.environ['OAUTHLIB_RELAX_TOKEN_SCOPE'] = '1'
+            
+            flow = Flow.from_client_config(
+                CLIENT_CONFIG,
+                scopes=[
+                    "https://www.googleapis.com/auth/calendar.events",
+                    "https://www.googleapis.com/auth/userinfo.email",
+                    "https://www.googleapis.com/auth/userinfo.profile",
+                    "openid"
+                ],
+                redirect_uri=''
+            )
+            flow.fetch_token(code=user.authCode)
+            credentials = flow.credentials
+            update_user_google_token(user.email, credentials.to_json())
+            print(f"✅ [LOGIN] Calendar token saved for {user.email} on first sign-in.")
+        except Exception as e:
+            print(f"⚠️ [LOGIN] Auth code exchange failed (non-fatal): {e}")
+    elif has_token:
+        print(f"♻️ [LOGIN] Reusing existing calendar token for {user.email}.")
+    
+    return {
+        "status": "success", 
+        "email": result["email"], 
+        "apiKey": result["api_key"],
+        "isNew": result["is_new"]
+    }
 
 @app.post("/update-api-key")
 async def update_api_key_endpoint(data: UpdateApiKey):
@@ -223,7 +266,8 @@ async def user_status_endpoint(email: str = Query(...)):
         except Exception as e:
             print(f"⚠️ Calendar Status Check Error: {e}")
             status["isCalendarLinked"] = False
-            
+    
+    print(f"🚦 [STATUS] {email}: API={status['isApiKeyValid']}, Calendar={status['isCalendarLinked']}")
     return status
 
 @app.get("/")
