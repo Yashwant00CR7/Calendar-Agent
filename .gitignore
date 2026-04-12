@@ -7,7 +7,34 @@ credentials.json
 android_client.json
 web_client.json
 users.db
-calendar_agent_app
-*.pyc
 .vscode/
 .idea/
+*.iml
+*.log
+
+# Old Python Backend Archive
+archive/
+
+# Flutter Build Artifacts & Generated Folders
+calendar_agent_app/.dart_tool/
+calendar_agent_app/.pub-cache/
+calendar_agent_app/.pub/
+calendar_agent_app/.flutter-plugins
+calendar_agent_app/.flutter-plugins-dependencies
+calendar_agent_app/build/
+calendar_agent_app/**/build/
+calendar_agent_app/android/.gradle/
+calendar_agent_app/android/local.properties
+calendar_agent_app/ios/Flutter/ephemeral/
+calendar_agent_app/linux/flutter/ephemeral/
+calendar_agent_app/macos/Flutter/ephemeral/
+calendar_agent_app/windows/flutter/ephemeral/
+
+# JVM crash/replay logs from Android/Gradle runs
+calendar_agent_app/android/hs_err_pid*.log
+calendar_agent_app/android/replay_pid*.log
+
+# Optional: keep built artifacts you explicitly copy here for sharing/releases
+!releases/
+!releases/*.apk
+!releases/*.aab
