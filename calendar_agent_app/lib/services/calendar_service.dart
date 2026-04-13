@@ -28,10 +28,23 @@ class CalendarService {
   }
 
   static const Map<String, String> colorMap = {
-    "lavender": "1", "sage": "2", "grape": "3", "flamingo": "4", "banana": "5",
-    "tangerine": "6", "peacock": "7", "graphite": "8", "blueberry": "9",
-    "basil": "10", "tomato": "11", "red": "11", "blue": "9", "green": "10",
-    "yellow": "5", "orange": "6", "purple": "3"
+    "lavender": "1",
+    "sage": "2",
+    "grape": "3",
+    "flamingo": "4",
+    "banana": "5",
+    "tangerine": "6",
+    "peacock": "7",
+    "graphite": "8",
+    "blueberry": "9",
+    "basil": "10",
+    "tomato": "11",
+    "red": "11",
+    "blue": "9",
+    "green": "10",
+    "yellow": "5",
+    "orange": "6",
+    "purple": "3",
   };
 
   Future<String> createEvent(
@@ -66,13 +79,14 @@ class CalendarService {
         summary: summary,
         location: location,
         description: description,
-        start: calendar.EventDateTime(dateTime: startDT, timeZone: "Asia/Kolkata"),
+        start: calendar.EventDateTime(
+          dateTime: startDT,
+          timeZone: "Asia/Kolkata",
+        ),
         end: calendar.EventDateTime(dateTime: endDT, timeZone: "Asia/Kolkata"),
         reminders: calendar.EventReminders(
           useDefault: false,
-          overrides: [
-            calendar.EventReminder(method: 'popup', minutes: 60),
-          ],
+          overrides: [calendar.EventReminder(method: 'popup', minutes: 60)],
         ),
       );
 
@@ -84,10 +98,11 @@ class CalendarService {
       }
 
       if (attendeeEmails != null && attendeeEmails.isNotEmpty) {
-        event.attendees = attendeeEmails
-            .where((email) => email.contains('@') && email.contains('.'))
-            .map((email) => calendar.EventAttendee(email: email.trim()))
-            .toList();
+        event.attendees =
+            attendeeEmails
+                .where((email) => email.contains('@') && email.contains('.'))
+                .map((email) => calendar.EventAttendee(email: email.trim()))
+                .toList();
       }
 
       final createdEvent = await _api.events.insert(event, 'primary');
@@ -115,11 +130,40 @@ class CalendarService {
       String output = "Upcoming Events:\n";
       for (var ev in events.items!) {
         final start = ev.start?.dateTime ?? ev.start?.date;
-        output += "ID: ${ev.id} | Summary: '${ev.summary ?? "No Title"}' | Start: $start\n";
+        output +=
+            "ID: ${ev.id} | Summary: '${ev.summary ?? "No Title"}' | Start: $start\n";
       }
       return output;
     } catch (e) {
       return "Failed to list events: $e";
+    }
+  }
+
+  Future<String> searchEvents(String query) async {
+    try {
+      final now = DateTime.now().toUtc();
+      final events = await _api.events.list(
+        'primary',
+        timeMin: now,
+        q: query,
+        maxResults: 50,
+        singleEvents: true,
+        orderBy: 'startTime',
+      );
+
+      if (events.items == null || events.items!.isEmpty) {
+        return "No events found matching '\$query'.";
+      }
+
+      String output = "Search Results:\n";
+      for (var ev in events.items!) {
+        final start = ev.start?.dateTime ?? ev.start?.date;
+        output +=
+            "ID: ${ev.id} | Summary: '${ev.summary ?? "No Title"}' | Start: $start\n";
+      }
+      return output;
+    } catch (e) {
+      return "Failed to search events: $e";
     }
   }
 

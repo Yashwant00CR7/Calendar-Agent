@@ -1,0 +1,58 @@
+Here is a comprehensive 5-stage **Quality Assurance (QA) Test Suite** specifically designed to test the limits of your new Serverless Twin Agent architecture. 
+
+Try typing these exactly as written to test everything from memory to calendar access!
+
+---
+
+### Test 1: The "Pure Search" Test
+*Tests if the Router correctly spots non-calendar queries.*
+
+* **Query:** `"Who won the IPL in 2024?"`
+* **Expected AI Action:** Routes to `SEARCH`. Answers using its intrinsic knowledge base (e.g., "Kolkata Knight Riders won the 2024 IPL").
+* **What to watch out for:** If it says "I scheduled an event," the router failed.
+
+---
+
+### Test 2: The "Memory & Context" Test
+*Tests the 5-turn sliding window and Peer History injection.*
+
+* **Query 1:** `"Can you tell me the date of Christmas this year?"`
+  * **Expected Answer:** "December 25, 2026." (Routes to SEARCH)
+* **Query 2:** `"Schedule a family dinner at 7 PM on that day."`
+  * **Expected Answer:** "I have scheduled a Family Dinner for December 25th at 7:00 PM." (Routes to CALENDAR).
+* **What to watch out for:** The AI **must** use the context from Query 1 to know the date for Query 2 without asking you "What date?". 
+
+---
+
+### Test 3: The "Proactive ID Hunting" Test
+*Tests if the Calendar Agent checks events before deleting them.*
+
+* **Query 1:** `"Schedule a meeting with Pradeesh for tomorrow at 3 PM."`
+  * **Expected Answer:** Confirms creation and provides a link.
+* **Query 2:** `"List my upcoming events."`
+  * **Expected Answer:** Gives you a numbered or bulleted list of events, including the Pradeesh meeting.
+* **Query 3:** `"Cancel the meeting with Pradeesh."`
+  * **Expected Answer:** "The meeting with Pradeesh has been deleted."
+* **What to watch out for:** The AI should **never** ask "What is the Event ID?". It should automatically run `list_upcoming_events_tool` in the background, find Pradeesh's ID itself, and delete it.
+
+---
+
+### Test 4: The "Ambiguous Filter" Test (The RCB Fix)
+*Tests the exact issue we just patched.*
+
+* **Query:** `"List all the RCB matches I have scheduled."`
+* **Expected AI Action:** Routes to `CALENDAR`. Calls `list_upcoming_events_tool`. 
+* **Expected Answer:** Either "Here are the RCB matches..." OR "I checked your calendar, but you don't have any RCB matches scheduled."
+* **What to watch out for:** It must NOT say "I don't have access to your personal calendar."
+
+---
+
+### Test 5: The "Complex Event Creation" Test
+*Tests if the `schedule_event_tool` properly passes all arguments.*
+
+* **Query:** `"Book a flight to Tokyo on Friday from 8 AM to 8 PM. The location is Narita Airport, make the color red, and invite yashwant@example.com."`
+* **Expected AI Action:** Routes to `CALENDAR`. Passes `summary`, `start`, `end`, `location`, `color_name` (red), and `attendee_emails`.
+* **Expected Answer:** Confirms the flight booking.
+* **What to watch out for:** Open Google Calendar on your phone. The event should actually be red, have the location set to Narita, and show the guest email.
+
+---

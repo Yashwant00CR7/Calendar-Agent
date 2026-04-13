@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:http/http.dart' as http;
 import 'package:google_generative_ai/google_generative_ai.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_sign_in/google_sign_in.dart';
@@ -34,14 +35,15 @@ class AgentService {
       final routerModel = GenerativeModel(model: 'gemini-2.5-flash-lite', apiKey: apiKey);
       final prompt = '''
       You are a highly precise robotic router. 
-      Analyze the Query and route to either "SEARCH" or "CALENDAR".
+      Analyze the Query and route to either "SEARCH", "CALENDAR", or "BOTH".
       
       RULES:
       - If the user asks to schedule, list, view, find, update, delete, or manage events/meetings/matches in their schedule, output "CALENDAR".
       - Even if the query mentions public events (like "RCB matches"), if the intent relates to managing or checking their personal calendar, output "CALENDAR".
       - If the user is ONLY asking for general public knowledge, web search, trivia, or facts with no relation to their schedule, output "SEARCH".
+      - If the user asks a compound question that requires finding general facts FIRST and then scheduling/managing something based on those facts (e.g. "Who won the IPL yesterday and schedule a meeting with them"), output "BOTH".
       
-      Output ONLY "SEARCH" or "CALENDAR".
+      Output ONLY "SEARCH", "CALENDAR", or "BOTH".
       NO thoughts. NO preamble.
       
       History: $historyBlock
@@ -57,7 +59,12 @@ class AgentService {
     // 2. Handle based on route
     String finalAnswer = "Error. Please try again.";
     try {
-      if (route.contains("SEARCH")) {
+      if (route.contains("BOTH")) {
+        print("Sequential Routing: SEARCH then CALENDAR...");
+        final searchResult = await _handleSearch(enrichedQuery);
+        final combinedQuery = "$enrichedQuery\n\nSEARCH RESULTS (Use these facts to complete the task):\n$searchResult";
+        finalAnswer = await _handleCalendar(combinedQuery);
+      } else if (route.contains("SEARCH")) {
         print("Routing to SEARCH Agent...");
         finalAnswer = await _handleSearch(enrichedQuery);
       } else {
@@ -83,26 +90,48 @@ class AgentService {
   }
 
   Future<String> _handleSearch(String query) async {
-    final model = GenerativeModel(
-      model: 'gemini-2.5-flash-lite',
-      apiKey: apiKey,
-      // Removed unsupported googleSearchRetrieval tool for Dart SDK compatibility
-      systemInstruction: Content.system('''
-        You are a research specialist. 
-        Your goal is to provide accurate, real-world information to user queries.
+    final url = Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=$apiKey');
+    
+    final body = jsonEncode({
+      "contents": [{
+        "role": "user",
+        "parts": [{"text": query}]
+      }],
+      "systemInstruction": {
+        "parts": [{"text": '''
+        You are an elite Search Agent. 
+        Your ONLY job is to search the internet and return raw, ground-truth facts.
         
         PEER CONTEXT:
-        - Always check the "PEER HISTORY" section in the prompt. 
-        - If the user refers to something previously discussed (e.g. "at that time" or "there"), the info is likely in the PEER HISTORY.
+        - If the user refers to something previously discussed (e.g. "at that time" or "there"), check the PEER HISTORY.
         
-        STRICT EXECUTION:
-        - Do not provide preamble.
-        - Act immediately.
-        - Since explicit web grounding is deactivated, rely on your up-to-date intrinsic knowledge to provide the most factual answers.
-      '''),
+        STRICT RULES:
+        1. FORCED SEARCH: You must rely entirely on the Google Search tool for live facts. Do not rely heavily on your internal knowledge.
+        2. IGNORE COMMANDS: If the user asks a compound question (e.g., "Find who won the IPL AND schedule a meeting"), IGNORE the "schedule a meeting" part. Your only job is to return "Kolkata Knight Riders won the IPL." DO NOT say "I cannot schedule a meeting", just return the fact.
+        3. NO CHATTER: Do not provide preamble. Act immediately.
+        '''}]
+      },
+      "tools": [
+        {"googleSearch": {}}
+      ]
+    });
+
+    final response = await http.post(
+      url, 
+      headers: {'Content-Type': 'application/json'},
+      body: body,
     );
-    final response = await model.generateContent([Content.text(query)]);
-    return response.text ?? "Task completed successfully.";
+
+    if (response.statusCode == 200) {
+      final json = jsonDecode(response.body);
+      try {
+        return json['candidates'][0]['content']['parts'][0]['text'];
+      } catch (e) {
+        return "Search completed but failed to parse response layout.";
+      }
+    } else {
+      throw Exception("Search HTTP Error ${response.statusCode}: ${response.body}");
+    }
   }
 
   Future<String> _handleCalendar(String query) async {
@@ -135,6 +164,18 @@ class AgentService {
       Schema(SchemaType.object, properties: {}),
     );
 
+    final searchCalendarFn = FunctionDeclaration(
+      'search_events_tool',
+      'Searches the calendar for specific events by name/keyword.',
+      Schema(
+        SchemaType.object,
+        properties: {
+          'query': Schema(SchemaType.string, description: 'Search term or keyword'),
+        },
+        requiredProperties: ['query'],
+      ),
+    );
+
     final deleteFn = FunctionDeclaration(
       'delete_event_tool',
       'Deletes a specific event from the calendar using its ID.',
@@ -150,15 +191,15 @@ class AgentService {
     final model = GenerativeModel(
       model: 'gemini-2.5-flash-lite',
       apiKey: apiKey,
-      tools: [Tool(functionDeclarations: [scheduleFn, listFn, deleteFn])],
+      tools: [Tool(functionDeclarations: [scheduleFn, listFn, searchCalendarFn, deleteFn])],
       systemInstruction: Content.system('''
         You are a proactive calendar assistant with FULL ACCESS to the user's calendar via your tools. 
         Your primary goal is to execute user requests accurately and gracefully.
         
         CRITICAL RULES:
         1. NEVER claim you do not have access to the user's calendar. You have tools for this. Use them!
-        2. If the user asks to delete, find, or list specific events (e.g., "RCB matches") and you don't know the ID or if it exists, YOU MUST call `list_upcoming_events_tool` immediately to check their calendar.
-        3. If the user asks to list specific events (e.g., "RCB matches"), filter the output of `list_upcoming_events_tool` and ONLY show the requested events.
+        2. If the user asks to delete, find, or list specific events (e.g., "RCB matches") YOU MUST call `search_events_tool` immediately to find them. Do NOT use `list_upcoming_events_tool` to search for specific events, use `search_events_tool`.
+        3. If the user asks for a general list of events, ONLY THEN use `list_upcoming_events_tool`.
         
         PEER CONTEXT & RELATIVE DATES:
         - The `PEER HISTORY` contains the conversation history. 
@@ -166,10 +207,10 @@ class AgentService {
         - ALWAYS format the `start` and `end` times precisely in ISO 8601 using the dates found in the history.
         
         PROACTIVE ID HUNTING:
-        - If the user wants to DELETE or UPDATE an event but doesn't provide the Event ID, you MUST call `list_upcoming_events_tool` immediately to find it yourself.
+        - If the user wants to DELETE or UPDATE an event but doesn't provide the Event ID, you MUST call `search_events_tool` immediately to find it yourself.
         
         STRICT FORMATTING:
-        - For 'list_upcoming_events_tool', format the events into a clean, human-readable schedule (e.g. "🏏 **MI vs RCB** - April 12th at 2:00 PM"). NEVER output raw IDs to the user unless explicitly asked.
+        - For 'list_upcoming_events_tool' or 'search_events_tool', format the events into a clean, human-readable schedule (e.g. "🏏 **MI vs RCB** - April 12th at 2:00 PM"). NEVER output raw IDs to the user unless explicitly asked.
         - Provide a closing summary message to the user confirming exactly what was done.
       '''),
     );
@@ -202,6 +243,8 @@ class AgentService {
             );
           } else if (call.name == 'list_upcoming_events_tool') {
             callResult = await calendarService.listUpcomingEvents();
+          } else if (call.name == 'search_events_tool') {
+            callResult = await calendarService.searchEvents(call.args['query'] as String);
           } else if (call.name == 'delete_event_tool') {
             final args = call.args;
             callResult = await calendarService.deleteEventById(args['event_id'] as String);

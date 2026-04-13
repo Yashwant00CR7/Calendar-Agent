@@ -6,7 +6,10 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 // import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:google_generative_ai/google_generative_ai.dart';
 import 'services/agent_service.dart';
+
+enum ApiStatus { valid, invalid, rateLimited, unknown }
 
 void main() {
   runApp(const CalendarAgentApp());
@@ -226,7 +229,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _scrollController = ScrollController();
   bool _isLoading = false;
   bool _isCalendarLinked = false;
-  bool _isApiKeyValid = false;
+  ApiStatus _apiStatus = ApiStatus.unknown;
 
   // Google Sign-In Configuration
   // On Android, clientId is inferred from your SHA-1 and Package Name.
@@ -251,13 +254,28 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _checkLinkStatus() async {
     try {
       final storage = const FlutterSecureStorage();
-      final key = await storage.read(key: 'gemini_api_key');
+      final key = await storage.read(key: 'gemini_api_key_${widget.email}');
 
       // Attempt sign in silently to check Google account status
       final account = await _googleSignIn.signInSilently();
 
+      ApiStatus currentStatus = ApiStatus.unknown;
+      if (key != null && key.isNotEmpty) {
+        try {
+          final model = GenerativeModel(model: 'gemini-2.5-flash-lite', apiKey: key);
+          await model.countTokens([Content.text('ping')]);
+          currentStatus = ApiStatus.valid;
+        } catch (e) {
+          if (e.toString().contains('429')) {
+             currentStatus = ApiStatus.rateLimited;
+          } else {
+             currentStatus = ApiStatus.invalid;
+          }
+        }
+      }
+
       setState(() {
-        _isApiKeyValid = (key != null && key.isNotEmpty);
+        _apiStatus = currentStatus;
         _isCalendarLinked = (account != null);
       });
     } catch (e) {
@@ -310,7 +328,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     try {
       final storage = const FlutterSecureStorage();
-      final key = await storage.read(key: 'gemini_api_key');
+      final key = await storage.read(key: 'gemini_api_key_${widget.email}');
       if (key == null || key.isEmpty) {
         setState(() {
           _messages.add(
@@ -330,17 +348,22 @@ class _ChatScreenState extends State<ChatScreen> {
       );
       final reply = await agent.chat(text);
 
-      setState(
-        () => _messages.add(
-          Message(text: reply, isUser: false, timestamp: DateTime.now()),
-        ),
-      );
+      setState(() {
+         _messages.add(Message(text: reply, isUser: false, timestamp: DateTime.now()));
+         _apiStatus = ApiStatus.valid; // If it succeeded, it's valid
+      });
     } catch (e) {
       print('Chat Connection Error: $e');
+      if (e.toString().contains('429')) {
+        setState(() => _apiStatus = ApiStatus.rateLimited);
+      } else if (e.toString().contains('API_KEY_INVALID') || e.toString().contains('400')) {
+        setState(() => _apiStatus = ApiStatus.invalid);
+      }
+      
       setState(
         () => _messages.add(
           Message(
-            text: 'Failed to connect: ${e.toString()}',
+            text: 'Connection Issue: ${e.toString()}',
             isUser: false,
             timestamp: DateTime.now(),
           ),
@@ -378,8 +401,8 @@ class _ChatScreenState extends State<ChatScreen> {
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceAround,
                       children: [
-                        _buildStatusItem("Gemini API", _isApiKeyValid),
-                        _buildStatusItem("Calendar", _isCalendarLinked),
+                        _buildStatusItem(_getApiStatusLabel(), _apiStatus == ApiStatus.valid, isRateLimited: _apiStatus == ApiStatus.rateLimited),
+                        _buildStatusItem("Calendar", _isCalendarLinked, isRateLimited: false),
                       ],
                     ),
                   ),
@@ -420,15 +443,15 @@ class _ChatScreenState extends State<ChatScreen> {
               ElevatedButton(
                 onPressed: () async {
                   final key = apiKeyCtrl.text.trim();
-                  if (key.isNotEmpty) {
-                    try {
-                      final storage = const FlutterSecureStorage();
-                      await storage.write(key: 'gemini_api_key', value: key);
+                    if (key.isNotEmpty) {
+                      try {
+                        final storage = const FlutterSecureStorage();
+                        await storage.write(key: 'gemini_api_key_${widget.email}', value: key);
 
-                      Navigator.pop(context);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('API Key updated!')),
-                      );
+                        Navigator.pop(context);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('API Key updated!')),
+                        );
                       await _checkLinkStatus();
                     } catch (e) {
                       ScaffoldMessenger.of(context).showSnackBar(
@@ -446,14 +469,29 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildStatusItem(String label, bool isValid) {
+  String _getApiStatusLabel() {
+    switch (_apiStatus) {
+      case ApiStatus.valid: return "API OK";
+      case ApiStatus.rateLimited: return "API 429";
+      case ApiStatus.invalid: return "API Invalid";
+      default: return "API Unset";
+    }
+  }
+
+  Widget _buildStatusItem(String label, bool isValid, {required bool isRateLimited}) {
+    IconData iconData = Icons.cancel;
+    Color color = Colors.redAccent;
+    if (isValid) {
+      iconData = Icons.check_circle;
+      color = Colors.greenAccent;
+    } else if (isRateLimited) {
+      iconData = Icons.warning_amber_rounded;
+      color = Colors.orangeAccent;
+    }
+    
     return Row(
       children: [
-        Icon(
-          isValid ? Icons.check_circle : Icons.cancel,
-          size: 16,
-          color: isValid ? Colors.greenAccent : Colors.redAccent,
-        ),
+        Icon(iconData, size: 16, color: color),
         const SizedBox(width: 4),
         Text(
           label,
@@ -465,12 +503,17 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Determine status dot color: Green (Both), Yellow (One), Red (None)
+    // Determine status dot color: Green (Both), Yellow/Orange (Rate limited/One), Red (None/Invalid)
     Color statusColor = Colors.redAccent;
-    if (_isCalendarLinked && _isApiKeyValid) {
+    if (_isCalendarLinked && _apiStatus == ApiStatus.valid) {
       statusColor = Colors.greenAccent;
-    } else if (_isCalendarLinked || _isApiKeyValid) {
+    } else if (_isCalendarLinked || _apiStatus == ApiStatus.valid) {
       statusColor = Colors.orangeAccent;
+    }
+    
+    // Explicit 429 override
+    if (_apiStatus == ApiStatus.rateLimited) {
+       statusColor = Colors.orangeAccent;
     }
 
     return Scaffold(
