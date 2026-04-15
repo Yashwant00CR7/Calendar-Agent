@@ -1,223 +1,443 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
+import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:google_generative_ai/google_generative_ai.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:path_provider/path_provider.dart';
 import 'calendar_service.dart';
+import 'memory_service.dart';
+
+enum LLMProvider { gemini, groq, openrouter }
+
+/// Custom exceptions for Error Liveliness to bubble up to UI global status
+abstract class AgentApiException implements Exception {
+  final String message;
+  final int? statusCode;
+  AgentApiException(this.message, [this.statusCode]);
+  @override
+  String toString() => message;
+}
+
+class RateLimitException extends AgentApiException {
+  RateLimitException([String msg = 'Rate limit exceeded (429). Please wait a moment.', int? code = 429]) : super(msg, code);
+}
+
+class InvalidCredentialsException extends AgentApiException {
+  InvalidCredentialsException([String msg = 'Invalid API key or unauthorized (401/403).', int? code = 401]) : super(msg, code);
+}
+
+class AgentBadRequestException extends AgentApiException {
+  AgentBadRequestException(String msg, [int? code = 400]) : super(msg, code);
+}
 
 class AgentService {
+  final LLMProvider provider;
   final String apiKey;
   final GoogleSignInAccount? account;
+  final String userEmail;
+  final String modelId;
+  final String sessionId;
 
-  AgentService({required this.apiKey, this.account});
+  AgentService({
+    this.provider = LLMProvider.gemini,
+    required this.apiKey,
+    required String userEmail,
+    required this.modelId,
+    required this.sessionId,
+    this.account,
+  }) : userEmail = userEmail.trim().toLowerCase();
 
-  Future<String> chat(String query) async {
-    // History handling
+  Future<String> chat(
+    String query, [
+    Uint8List? fileBytes,
+    String? mimeType,
+  ]) async {
+    // Session-based history handling
     final prefs = await SharedPreferences.getInstance();
-    final String rawHistory = prefs.getString('chat_history_${account?.email ?? "default"}') ?? '[]';
+    final String rawHistory = prefs.getString('chat_history_$sessionId') ?? '[]';
     List<dynamic> historyList = jsonDecode(rawHistory);
-    
-    // Build context
-    String historyBlock = "";
-    if (historyList.isNotEmpty) {
-      historyBlock = "\nPEER HISTORY (Previous turn context):\n";
-      for (var turn in historyList) {
-        historyBlock += "User: ${turn['user']}\nAI: ${turn['ai']}\n\n";
+
+    // Update session metadata if this is the first message
+    await _updateSessionMetadata(query);
+
+    String? tempFilePath;
+    if (fileBytes != null) {
+      try {
+        final tempDir = await getTemporaryDirectory();
+        final file = File(
+          '${tempDir.path}/temp_doc_${DateTime.now().millisecondsSinceEpoch}_${mimeType?.replaceAll('/', '_')}',
+        );
+        await file.writeAsBytes(fileBytes);
+        tempFilePath = file.path;
+      } catch (e) {
+        debugPrint("Failed to save temp file: $e");
       }
     }
 
-    final nowContext = DateTime.now().toString();
-    final enrichedQuery = "Context: Today is $nowContext\n$historyBlock\nCURRENT TASK:\n$query";
+    String finalAnswer = "";
 
-    // 1. Route Intent
-    String route;
     try {
-      final routerModel = GenerativeModel(model: 'gemini-2.5-flash-lite', apiKey: apiKey);
-      final prompt = '''
-      You are a highly precise robotic router. 
-      Analyze the Query and route to either "SEARCH", "CALENDAR", or "BOTH".
-      
-      RULES:
-      - If the user asks to schedule, list, view, find, update, delete, or manage events/meetings/matches in their schedule, output "CALENDAR".
-      - Even if the query mentions public events (like "RCB matches"), if the intent relates to managing or checking their personal calendar, output "CALENDAR".
-      - If the user is ONLY asking for general public knowledge, web search, trivia, or facts with no relation to their schedule, output "SEARCH".
-      - If the user asks a compound question that requires finding general facts FIRST and then scheduling/managing something based on those facts (e.g. "Who won the IPL yesterday and schedule a meeting with them"), output "BOTH".
-      
-      Output ONLY "SEARCH", "CALENDAR", or "BOTH".
-      NO thoughts. NO preamble.
-      
-      History: $historyBlock
-      Query: "$query"
-      ''';
-      final response = await routerModel.generateContent([Content.text(prompt)]);
-      route = response.text?.trim().toUpperCase() ?? "CALENDAR";
-    } catch (e) {
-      print("Router error: $e");
-      route = "CALENDAR";
-    }
-
-    // 2. Handle based on route
-    String finalAnswer = "Error. Please try again.";
-    try {
-      if (route.contains("BOTH")) {
-        print("Sequential Routing: SEARCH then CALENDAR...");
-        final searchResult = await _handleSearch(enrichedQuery);
-        final combinedQuery = "$enrichedQuery\n\nSEARCH RESULTS (Use these facts to complete the task):\n$searchResult";
-        finalAnswer = await _handleCalendar(combinedQuery);
-      } else if (route.contains("SEARCH")) {
-        print("Routing to SEARCH Agent...");
-        finalAnswer = await _handleSearch(enrichedQuery);
+      // BRANCH BASED ON PROVIDER
+      if (provider != LLMProvider.gemini) {
+        debugPrint("Using OpenAI-compatible workflow ($provider)...");
+        finalAnswer = await _handleOpenAICompatible(query, historyList);
       } else {
-        print("Routing to CALENDAR Agent...");
-        finalAnswer = await _handleCalendar(enrichedQuery);
+        debugPrint("Using Gemini agentic workflow...");
+        finalAnswer = await _handleCalendar(
+          query,
+          historyList,
+          currentFileBytes: fileBytes,
+          currentMimeType: mimeType,
+        );
       }
+    } on AgentApiException {
+      rethrow; // Bubble up specialized errors
     } catch (e) {
-      print("Agent error: $e");
-      if (e.toString().contains("API_KEY_INVALID") || e.toString().contains("400")) {
-        return "Error: Invalid Gemini API key. Please update it in Settings (gear icon).";
-      }
-      return "Model Error: $e";
+      debugPrint("Agent Service Error: $e");
+      final errorMsg = e.toString();
+      if (errorMsg.contains('429')) throw RateLimitException();
+      if (errorMsg.contains('401') || errorMsg.contains('403')) throw InvalidCredentialsException();
+      throw AgentBadRequestException("Service error: $e");
     }
 
     // 3. Update history
-    historyList.add({"user": query, "ai": finalAnswer});
-    if (historyList.length > 5) {
+    historyList.add({
+      "user": query,
+      "ai": finalAnswer,
+      if (tempFilePath != null) "file_path": tempFilePath,
+      if (mimeType != null) "mime_type": mimeType,
+    });
+    
+    // Keep a reasonable context window
+    if (historyList.length > 8) {
       historyList.removeAt(0);
     }
-    await prefs.setString('chat_history_${account?.email ?? "default"}', jsonEncode(historyList));
+    
+    await prefs.setString('chat_history_$sessionId', jsonEncode(historyList));
 
     return finalAnswer;
   }
 
-  Future<String> _handleSearch(String query) async {
-    final url = Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=$apiKey');
-    
-    final body = jsonEncode({
-      "contents": [{
-        "role": "user",
-        "parts": [{"text": query}]
-      }],
-      "systemInstruction": {
-        "parts": [{"text": '''
-        You are an elite Search Agent. 
-        Your ONLY job is to search the internet and return raw, ground-truth facts.
-        
-        PEER CONTEXT:
-        - If the user refers to something previously discussed (e.g. "at that time" or "there"), check the PEER HISTORY.
-        
-        STRICT RULES:
-        1. FORCED SEARCH: You must rely entirely on the Google Search tool for live facts. Do not rely heavily on your internal knowledge.
-        2. IGNORE COMMANDS: If the user asks a compound question (e.g., "Find who won the IPL AND schedule a meeting"), IGNORE the "schedule a meeting" part. Your only job is to return "Kolkata Knight Riders won the IPL." DO NOT say "I cannot schedule a meeting", just return the fact.
-        3. NO CHATTER: Do not provide preamble. Act immediately.
-        '''}]
-      },
-      "tools": [
-        {"googleSearch": {}}
-      ]
-    });
+  Future<void> _updateSessionMetadata(String query) async {
+    final prefs = await SharedPreferences.getInstance();
+    final String sessionsKey = 'chat_sessions_$userEmail';
+    final String rawSessions = prefs.getString(sessionsKey) ?? '[]';
+    List<dynamic> sessions = jsonDecode(rawSessions);
 
-    final response = await http.post(
-      url, 
-      headers: {'Content-Type': 'application/json'},
-      body: body,
-    );
-
-    if (response.statusCode == 200) {
-      final json = jsonDecode(response.body);
-      try {
-        return json['candidates'][0]['content']['parts'][0]['text'];
-      } catch (e) {
-        return "Search completed but failed to parse response layout.";
-      }
+    int index = sessions.indexWhere((s) => s['id'] == sessionId);
+    if (index == -1) {
+      // New session
+      String title = query.length > 40 ? "${query.substring(0, 37)}..." : query;
+      sessions.insert(0, {
+        'id': sessionId,
+        'title': title,
+        'timestamp': DateTime.now().toIso8601String(),
+      });
     } else {
-      throw Exception("Search HTTP Error ${response.statusCode}: ${response.body}");
+      // Update existing session timestamp to bring to top
+      final session = sessions.removeAt(index);
+      session['timestamp'] = DateTime.now().toIso8601String();
+      sessions.insert(0, session);
+    }
+    await prefs.setString(sessionsKey, jsonEncode(sessions));
+  }
+
+  static Future<List<Map<String, dynamic>>> getSessions(String userEmail) async {
+    final prefs = await SharedPreferences.getInstance();
+    final String rawSessions = prefs.getString('chat_sessions_$userEmail') ?? '[]';
+    List<dynamic> sessions = jsonDecode(rawSessions);
+    return sessions.map((s) => Map<String, dynamic>.from(s)).toList();
+  }
+
+  static Future<void> deleteSession(String userEmail, String sessionId) async {
+    final prefs = await SharedPreferences.getInstance();
+    
+    // Remove from metadata list
+    final String sessionsKey = 'chat_sessions_$userEmail';
+    final String rawSessions = prefs.getString(sessionsKey) ?? '[]';
+    List<dynamic> sessions = jsonDecode(rawSessions);
+    sessions.removeWhere((s) => s['id'] == sessionId);
+    await prefs.setString(sessionsKey, jsonEncode(sessions));
+
+    // Remove history messages
+    await prefs.remove('chat_history_$sessionId');
+  }
+
+
+  List<Map<String, dynamic>> _mapToolsToOpenAI() {
+    return [
+      {
+        "type": "function",
+        "function": {
+          "name": "schedule_event_tool",
+          "description": "Schedules a new event in the Google Calendar.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "summary": {"type": "string", "description": "Event title"},
+              "start": {"type": "string", "description": "Start time in ISO format"},
+              "end": {"type": "string", "description": "End time in ISO format"},
+              "location": {"type": "string", "description": "Event location"},
+              "description": {"type": "string", "description": "Event description"},
+              "color_name": {
+                "type": "string",
+                "description": "Color name (lavender, sage, etc.)"
+              },
+              "attendee_emails": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of attendee emails"
+              },
+              "overwrite": {
+                "type": "boolean",
+                "description": "If true, conflicting events will be deleted and replaced."
+              }
+            },
+            "required": ["summary", "start", "end"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "list_upcoming_events_tool",
+          "description": "Lists the user's upcoming 10 calendar events.",
+          "parameters": {"type": "object", "properties": {}}
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "search_events_tool",
+          "description": "Searches the calendar for specific events by name/keyword.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string", "description": "Search term or keyword"}
+            },
+            "required": ["query"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "delete_event_tool",
+          "description": "Deletes a specific event from the calendar using its ID.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "event_id": {"type": "string", "description": "ID of the event to delete"}
+            },
+            "required": ["event_id"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "save_to_personal_memory_tool",
+          "description": "Schedules key takeaways into the user's RAG memory.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "content": {"type": "string", "description": "The text to save."},
+              "source_type": {
+                "type": "string", 
+                "enum": ["Personal", "Document", "Calendar"],
+                "description": "Category of the information (Defaults to Personal)."
+              }
+            },
+            "required": ["content"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "query_personal_memory_tool",
+          "description": "Retrieves past context from the user's personal long-term memory.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string", "description": "The search term."}
+            },
+            "required": ["query"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "web_search_tool",
+          "description": "Searches the internet for real-time information, news, or public facts.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string", "description": "The search term."}
+            },
+            "required": ["query"]
+          }
+        }
+      }
+    ];
+  }
+
+  Future<String> _performWebSearch(String query) async {
+    try {
+      // Using DuckDuckGo Instant Answer API for reliability
+      // Fallback to a simple HTML-lite request if needed
+      final url = Uri.parse('https://api.duckduckgo.com/?q=${Uri.encodeComponent(query)}&format=json&no_html=1&skip_disambig=1');
+      final response = await http.get(url, headers: {'User-Agent': 'CalendarAI/1.0'});
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        String results = "";
+        
+        final abstract = data['AbstractText'] as String;
+        if (abstract.isNotEmpty) {
+          results += "TOP RESULT: $abstract\n\n";
+        }
+
+        final related = data['RelatedTopics'] as List;
+        if (related.isNotEmpty) {
+          results += "RELATED SNIPPETS:\n";
+          for (var item in related.take(5)) {
+            if (item is Map && item.containsKey('Text')) {
+              results += "- ${item['Text']}\n";
+            }
+          }
+        }
+
+        if (results.isEmpty) {
+          return "No direct snippets found for '$query'. Try a broader search term.";
+        }
+        return results;
+      } else {
+        return "Search failed with status: ${response.statusCode}";
+      }
+    } catch (e) {
+      return "Search error: $e";
     }
   }
 
-  Future<String> _handleCalendar(String query) async {
+  Future<String> _handleOpenAICompatible(
+    String query,
+    List<dynamic> historyList,
+  ) async {
+    String baseUrl = provider == LLMProvider.groq 
+        ? "https://api.groq.com/openai/v1" 
+        : "https://openrouter.ai/api/v1";
+
     final calendarService = await CalendarService.create(account);
     if (calendarService == null) {
       return "Error: Google Calendar not linked. Please sign in again.";
     }
 
-    final scheduleFn = FunctionDeclaration(
-      'schedule_event_tool',
-      'Schedules a new event in the Google Calendar.',
-      Schema(
-        SchemaType.object,
-        properties: {
-          'summary': Schema(SchemaType.string, description: 'Event title'),
-          'start': Schema(SchemaType.string, description: 'Start time in ISO format'),
-          'end': Schema(SchemaType.string, description: 'End time in ISO format'),
-          'location': Schema(SchemaType.string, description: 'Event location', nullable: true),
-          'description': Schema(SchemaType.string, description: 'Event description', nullable: true),
-          'color_name': Schema(SchemaType.string, description: 'Color name. MUST be one of: lavender, sage, grape, flamingo, banana, tangerine, peacock, graphite, blueberry, basil, tomato, red, blue, green, yellow, orange, purple.', nullable: true),
-          'attendee_emails': Schema(SchemaType.array, items: Schema(SchemaType.string), description: 'List of attendee emails', nullable: true),
-        },
-        requiredProperties: ['summary', 'start', 'end'],
-      ),
-    );
+    List<Map<String, dynamic>> messages = [
+      {
+        "role": "system",
+        "content": _getSystemInstructions(),
+      }
+    ];
 
-    final listFn = FunctionDeclaration(
-      'list_upcoming_events_tool',
-      'Lists the user\'s upcoming 10 calendar events.',
-      Schema(SchemaType.object, properties: {}),
-    );
+    // Add history
+    for (var turn in historyList) {
+      messages.add({"role": "user", "content": turn['user']});
+      messages.add({"role": "assistant", "content": turn['ai']});
+    }
 
-    final searchCalendarFn = FunctionDeclaration(
-      'search_events_tool',
-      'Searches the calendar for specific events by name/keyword.',
-      Schema(
-        SchemaType.object,
-        properties: {
-          'query': Schema(SchemaType.string, description: 'Search term or keyword'),
-        },
-        requiredProperties: ['query'],
-      ),
-    );
+    messages.add({"role": "user", "content": query});
 
-    final deleteFn = FunctionDeclaration(
-      'delete_event_tool',
-      'Deletes a specific event from the calendar using its ID.',
-      Schema(
-        SchemaType.object,
-        properties: {
-          'event_id': Schema(SchemaType.string, description: 'ID of the event to delete'),
+    final tools = _mapToolsToOpenAI();
+
+    while (true) {
+      final response = await http.post(
+        Uri.parse("$baseUrl/chat/completions"),
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer $apiKey",
+          if(provider == LLMProvider.openrouter) "HTTP-Referer": "https://calendar-ai.app",
+          if(provider == LLMProvider.openrouter) "X-Title": "Calendar AI Agent",
         },
-        requiredProperties: ['event_id'],
-      ),
-    );
+        body: jsonEncode({
+          "model": modelId,
+          "messages": messages,
+          "tools": tools,
+          "tool_choice": "auto",
+        }),
+      );
+
+      if (response.statusCode != 200) {
+        throw Exception("Provider Error (${response.statusCode}): ${response.body}");
+      }
+
+      final data = jsonDecode(response.body);
+      final choice = data['choices'][0];
+      final message = choice['message'];
+      messages.add(message);
+
+      if (message['tool_calls'] == null) {
+        return message['content'] ?? "Task completed.";
+      }
+
+      // Handle tool calls
+      for (var call in message['tool_calls']) {
+        final toolName = call['function']['name'];
+        final args = jsonDecode(call['function']['arguments']);
+        String result = "";
+
+        try {
+          result = await _executeTool(toolName, args, calendarService);
+        } catch (e) {
+          result = "Tool error: $e";
+        }
+
+        messages.add({
+          "role": "tool",
+          "tool_call_id": call['id'],
+          "name": toolName,
+          "content": result,
+        });
+      }
+    }
+  }
+
+  Future<String> _handleCalendar(
+    String query,
+    List<dynamic> historyList, {
+    Uint8List? currentFileBytes,
+    String? currentMimeType,
+  }) async {
+    final calendarService = await CalendarService.create(account);
+    if (calendarService == null) {
+      return "Error: Google Calendar not linked. Please sign in again.";
+    }
 
     final model = GenerativeModel(
-      model: 'gemini-2.5-flash-lite',
+      model: modelId,
       apiKey: apiKey,
-      tools: [Tool(functionDeclarations: [scheduleFn, listFn, searchCalendarFn, deleteFn])],
-      systemInstruction: Content.system('''
-        You are a proactive calendar assistant with FULL ACCESS to the user's calendar via your tools. 
-        Your primary goal is to execute user requests accurately and gracefully.
-        
-        CRITICAL RULES:
-        1. NEVER claim you do not have access to the user's calendar. You have tools for this. Use them!
-        2. If the user asks to delete, find, or list specific events (e.g., "RCB matches") YOU MUST call `search_events_tool` immediately to find them. Do NOT use `list_upcoming_events_tool` to search for specific events, use `search_events_tool`.
-        3. If the user asks for a general list of events, ONLY THEN use `list_upcoming_events_tool`.
-        
-        PEER CONTEXT & RELATIVE DATES:
-        - The `PEER HISTORY` contains the conversation history. 
-        - If the user uses pronouns like "that day", "then", or "tomorrow", you MUST read the `PEER HISTORY` to find the exact date/time they are referring to. Do NOT guess the date.
-        - ALWAYS format the `start` and `end` times precisely in ISO 8601 using the dates found in the history.
-        
-        PROACTIVE ID HUNTING:
-        - If the user wants to DELETE or UPDATE an event but doesn't provide the Event ID, you MUST call `search_events_tool` immediately to find it yourself.
-        
-        STRICT FORMATTING:
-        - For 'list_upcoming_events_tool' or 'search_events_tool', format the events into a clean, human-readable schedule (e.g. "🏏 **MI vs RCB** - April 12th at 2:00 PM"). NEVER output raw IDs to the user unless explicitly asked.
-        - Provide a closing summary message to the user confirming exactly what was done.
-      '''),
+      tools: [
+        Tool(
+          functionDeclarations: _getGeminiTools(),
+        ),
+      ],
+      systemInstruction: Content.system(_getSystemInstructions()),
     );
 
-    final chatSession = model.startChat();
-    var response = await chatSession.sendMessage(Content.text(query));
+    final mappedHistory = await _mapHistoryToGemini(historyList);
+    final chatSession = model.startChat(history: mappedHistory);
     
+    // Create current turn parts
+    List<Part> parts = [TextPart(query)];
+    if (currentFileBytes != null && currentMimeType != null) {
+      parts.add(DataPart(currentMimeType, currentFileBytes));
+    }
+
+    var response = await chatSession.sendMessage(Content.multi(parts));
+
     // Function calling loop
     while (response.functionCalls.isNotEmpty) {
       final calls = response.functionCalls.toList();
@@ -226,42 +446,229 @@ class AgentService {
       for (final call in calls) {
         String callResult = "";
         try {
-          if (call.name == 'schedule_event_tool') {
-            final args = call.args;
-            List<String>? attendees;
-            if (args['attendee_emails'] != null) {
-              attendees = (args['attendee_emails'] as List).map((e) => e.toString()).toList();
-            }
-            callResult = await calendarService.createEvent(
-              args['summary'] as String,
-              args['start'] as String,
-              args['end'] as String,
-              location: args['location'] as String? ?? "",
-              description: args['description'] as String? ?? "",
-              colorName: args['color_name'] as String?,
-              attendeeEmails: attendees,
-            );
-          } else if (call.name == 'list_upcoming_events_tool') {
-            callResult = await calendarService.listUpcomingEvents();
-          } else if (call.name == 'search_events_tool') {
-            callResult = await calendarService.searchEvents(call.args['query'] as String);
-          } else if (call.name == 'delete_event_tool') {
-            final args = call.args;
-            callResult = await calendarService.deleteEventById(args['event_id'] as String);
-          } else {
-            callResult = "Error: Unknown function ${call.name}";
-          }
+          callResult = await _executeTool(call.name, call.args, calendarService);
         } catch (e) {
           callResult = "Function error: $e";
         }
         responses.add(FunctionResponse(call.name, {'result': callResult}));
       }
-      
+
       response = await chatSession.sendMessage(
-        Content.functionResponses(responses)
+        Content.functionResponses(responses),
       );
     }
-    
+
     return response.text ?? "Task completed successfully.";
+  }
+
+  Future<List<Content>> _mapHistoryToGemini(List<dynamic> historyList) async {
+    List<Content> history = [];
+    for (var turn in historyList) {
+      // User Message
+      List<Part> userParts = [TextPart(turn['user'] as String)];
+      if (turn['file_path'] != null && turn['mime_type'] != null) {
+        try {
+          final file = File(turn['file_path']);
+          if (await file.exists()) {
+            userParts.add(DataPart(turn['mime_type'], await file.readAsBytes()));
+          }
+        } catch (e) {
+          debugPrint("Failed to map history file: $e");
+        }
+      }
+      history.add(Content('user', userParts));
+
+      // Model Message
+      history.add(Content('model', [TextPart(turn['ai'] as String)]));
+    }
+    return history;
+  }
+
+  Future<String> _executeTool(String name, Map<String, dynamic> args, CalendarService calendarService) async {
+    switch (name) {
+      case 'schedule_event_tool':
+        return await calendarService.createEvent(
+          args['summary'].toString(),
+          args['start'].toString(),
+          args['end'].toString(),
+          location: args['location']?.toString() ?? "",
+          description: args['description']?.toString() ?? "",
+          colorName: args['color_name']?.toString(),
+          attendeeEmails: args['attendee_emails'] != null ? List<String>.from(args['attendee_emails']) : null,
+          overwrite: args['overwrite'] == true,
+        );
+      case 'list_upcoming_events_tool':
+        return await calendarService.listUpcomingEvents();
+      case 'search_events_tool':
+        return await calendarService.searchEvents(args['query'].toString());
+      case 'delete_event_tool':
+        return await calendarService.deleteEventById(args['event_id'].toString());
+      case 'save_to_personal_memory_tool':
+        String contentToSave = args['content'].toString();
+        String sourceType = args['source_type']?.toString() ?? 'Personal';
+
+        // AGENTIC REFINEMENT: Transform messy text into clean facts before indexing
+        final refinedContent = await _refineMemoryContent(contentToSave);
+
+        return await MemoryService.indexDocument(
+          userEmail, 
+          refinedContent, 
+          apiKey,
+          sourceType: sourceType,
+          metadata: {
+            'original_text': contentToSave,
+            'refined_at': DateTime.now().toIso8601String(),
+          },
+        );
+      case 'query_personal_memory_tool':
+        return await MemoryService.queryMemory(userEmail, args['query'].toString(), apiKey);
+      case 'web_search_tool':
+        return await _performWebSearch(args['query'].toString());
+      default:
+        return "Error: Unknown tool $name";
+    }
+  }
+
+  String _getSystemInstructions() {
+    return '''
+### DIRECTIVES
+- **Context Awareness**: Today is ${DateTime.now().toString()}. Use device-local timezone.
+- **Proactive Scheduling**: Parse documents (Images/PDFs) to identify "Single Events" vs "Timetables".
+- **Conflict Vigilance**: Always call `list_upcoming_events_tool` before scheduling any new events.
+- **Ambiguity Gate**: Ask clarifying questions before bulk-scheduling if data is unclear.
+- **Visual Callouts**: Use bold 🚨 **CONFLICT DETECTED** 🚨 for overlapping events.
+- **Memory Autonomy**: Query `query_personal_memory_tool` for past file context before asking user.
+- **Resolution**: Use `overwrite: true` only if user asks to "replace", "fix", or "overwrite" a conflict.
+
+### CONSTRAINTS
+- **Access Authority**: Never claim you lack access to the calendar. Use tools.
+- **Privacy**: Never share or index data across user boundaries.
+- **Manual Memory**: ONLY `save_to_personal_memory_tool` if user says "remember this" or "save this".
+- **Minimal Preamble**: Do not explain your tools; just execute and provide a clear summary.
+
+### FORMATTING
+- Clean human-readable lists with emojis.
+- Final confirmation summarizing all actions performed.
+''';
+  }
+  List<FunctionDeclaration> _getGeminiTools() {
+    return [
+      FunctionDeclaration(
+        'schedule_event_tool',
+        'Schedules a new event in the Google Calendar.',
+        Schema(
+          SchemaType.object,
+          properties: {
+            'summary': Schema(SchemaType.string, description: 'Event title'),
+            'start': Schema(SchemaType.string, description: 'Start time in ISO format'),
+            'end': Schema(SchemaType.string, description: 'End time in ISO format'),
+            'location': Schema(SchemaType.string, description: 'Event location', nullable: true),
+            'description': Schema(SchemaType.string, description: 'Event description', nullable: true),
+            'color_name': Schema(SchemaType.string, description: 'Color name (lavender, sage, etc.)', nullable: true),
+            'attendee_emails': Schema(SchemaType.array, items: Schema(SchemaType.string), description: 'List of attendee emails', nullable: true),
+            'overwrite': Schema(SchemaType.boolean, description: 'If true, conflicting events will be deleted and replaced by this new one.', nullable: true),
+          },
+          requiredProperties: ['summary', 'start', 'end'],
+        ),
+      ),
+      FunctionDeclaration(
+        'list_upcoming_events_tool',
+        'Lists the user\'s upcoming 10 calendar events.',
+        Schema(SchemaType.object, properties: {}),
+      ),
+      FunctionDeclaration(
+        'search_events_tool',
+        'Searches the calendar for specific events by name/keyword.',
+        Schema(
+          SchemaType.object,
+          properties: {
+            'query': Schema(SchemaType.string, description: 'Search term or keyword'),
+          },
+          requiredProperties: ['query'],
+        ),
+      ),
+      FunctionDeclaration(
+        'delete_event_tool',
+        'Deletes a specific event from the calendar using its ID.',
+        Schema(
+          SchemaType.object,
+          properties: {
+            'event_id': Schema(SchemaType.string, description: 'ID of the event to delete'),
+          },
+          requiredProperties: ['event_id'],
+        ),
+      ),
+      FunctionDeclaration(
+        'save_to_personal_memory_tool',
+        'Schedules key takeaways / parsed document data into the user\'s long-term RAG memory.',
+        Schema(
+          SchemaType.object,
+          properties: {
+            'content': Schema(SchemaType.string, description: 'The text snippet or document summary to save.'),
+            'source_type': Schema(
+              SchemaType.string, 
+              description: 'Category of the information.',
+              enumValues: ['Personal', 'Document', 'Calendar'],
+              nullable: true,
+            ),
+          },
+          requiredProperties: ['content'],
+        ),
+      ),
+      FunctionDeclaration(
+        'query_personal_memory_tool',
+        'Retrieves past context from the user\'s personal long-term memory.',
+        Schema(
+          SchemaType.object,
+          properties: {
+            'query': Schema(SchemaType.string, description: 'The search term or question to look up.'),
+          },
+          requiredProperties: ['query'],
+        ),
+      ),
+      FunctionDeclaration(
+        'web_search_tool',
+        'Searches the internet for real-time information, news, or public facts.',
+        Schema(
+          SchemaType.object,
+          properties: {
+            'query': Schema(SchemaType.string, description: 'The search term or question to look up.'),
+          },
+          requiredProperties: ['query'],
+        ),
+      ),
+    ];
+  }
+
+  Future<String> _refineMemoryContent(String content) async {
+    try {
+      // Use the existing provider settings for refinement
+      final model = GenerativeModel(
+        model: modelId,
+        apiKey: apiKey,
+      );
+      
+      final prompt = '''
+REFINEMENT TASK: Transform the following messy, conversational, or document-fragment text into a "Clean Fact".
+A "Clean Fact" is a single, atomic, declarative sentence that is easy to search later via RAG.
+
+RULES:
+- Remove personal pronouns if they make the fact ambiguous (e.g., change "I have a meeting" to "The user has a meeting").
+- Date/Time context: Today is ${DateTime.now().toIso8601String()}.
+- If the text contains multiple facts, combine them into one concise entry or focus on the most important one.
+- DO NOT add preamble or meta-commentary. Just output the clean fact.
+
+MESSY TEXT: "$content"
+
+CLEAN FACT:''';
+
+      final response = await model.generateContent([Content.text(prompt)]);
+      final result = response.text?.trim() ?? content;
+      debugPrint("Agentic Refinement Success: '$content' -> '$result'");
+      return result;
+    } catch (e) {
+      debugPrint("Refinement failed: $e. Using original content.");
+      return content;
+    }
   }
 }

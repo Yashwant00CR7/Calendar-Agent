@@ -15,7 +15,7 @@ class GoogleAuthClient extends http.BaseClient {
 }
 
 class CalendarService {
-  late calendar.CalendarApi _api;
+  final calendar.CalendarApi _api;
 
   CalendarService._(this._api);
 
@@ -55,35 +55,67 @@ class CalendarService {
     String description = "",
     String? colorName,
     List<String>? attendeeEmails,
+    bool overwrite = false,
   }) async {
     try {
-      // Check for duplicates
+      final startDT = DateTime.parse(startIso);
+      final endDT = DateTime.parse(endIso);
+
+      // 1. Check for Conflicts (Overlap)
+      // We check for events on the same day to find potential overlaps
+      final dayStart = DateTime(startDT.year, startDT.month, startDT.day, 0, 0, 0);
+      final dayEnd = DateTime(startDT.year, startDT.month, startDT.day, 23, 59, 59);
+
       final existingEvents = await _api.events.list(
         'primary',
+        timeMin: dayStart.toUtc(),
+        timeMax: dayEnd.toUtc(),
         singleEvents: true,
         orderBy: 'startTime',
       );
 
+      List<String> eventsToDelete = [];
+
       for (var ev in existingEvents.items ?? []) {
-        final existingSummary = ev.summary ?? "";
-        final existingStart = ev.start?.dateTime?.toIso8601String() ?? "";
-        if (existingSummary == summary && existingStart == startIso) {
-          return "Event already exists: $summary.";
+        final exStart = ev.start?.dateTime?.toLocal() ?? (ev.start?.date != null ? ev.start!.date : null);
+        final exEnd = ev.end?.dateTime?.toLocal() ?? (ev.end?.date != null ? ev.end!.date : null);
+
+        if (exStart == null || exEnd == null) continue;
+
+        // Overlap logic: (StartA < EndB) && (EndA > StartB)
+        if (startDT.isBefore(exEnd) && endDT.isAfter(exStart)) {
+          if (overwrite) {
+            if (ev.id != null) {
+              eventsToDelete.add(ev.id!);
+            }
+            continue;
+          }
+
+          // Check if it's an exact duplicate first for a better message
+          if (ev.summary == summary && exStart.isAtSameMomentAs(startDT)) {
+            return "CONFLICT: Event already exists: $summary at ${exStart.toLocal()}.";
+          }
+          final conflictTime = "${exStart.hour}:${exStart.minute.toString().padLeft(2, '0')} - ${exEnd.hour}:${exEnd.minute.toString().padLeft(2, '0')}";
+          return "CONFLICT: The new event '$summary' overlaps with an existing event '${ev.summary}' ($conflictTime). Please confirm if you want to proceed.";
         }
       }
 
-      final startDT = DateTime.parse(startIso);
-      final endDT = DateTime.parse(endIso);
+      // If overwrite is enabled, delete all gathered overlaps
+      if (overwrite && eventsToDelete.isNotEmpty) {
+        for (var id in eventsToDelete) {
+          await _api.events.delete('primary', id);
+        }
+      }
 
+      // 2. Create Event
       final event = calendar.Event(
         summary: summary,
         location: location,
         description: description,
         start: calendar.EventDateTime(
-          dateTime: startDT,
-          timeZone: "Asia/Kolkata",
+          dateTime: startDT.toUtc(),
         ),
-        end: calendar.EventDateTime(dateTime: endDT, timeZone: "Asia/Kolkata"),
+        end: calendar.EventDateTime(dateTime: endDT.toUtc()),
         reminders: calendar.EventReminders(
           useDefault: false,
           overrides: [calendar.EventReminder(method: 'popup', minutes: 60)],
@@ -106,11 +138,16 @@ class CalendarService {
       }
 
       final createdEvent = await _api.events.insert(event, 'primary');
-      return "Successfully created event: $summary. Link: ${createdEvent.htmlLink}";
+      String msg = "Successfully created event: $summary.";
+      if (overwrite && eventsToDelete.isNotEmpty) {
+        msg = "Successfully replaced existing event(s) and created: $summary.";
+      }
+      return "$msg Link: ${createdEvent.htmlLink}";
     } catch (e) {
       return "Failed to create event $summary: $e";
     }
   }
+
 
   Future<String> listUpcomingEvents() async {
     try {
@@ -142,9 +179,10 @@ class CalendarService {
   Future<String> searchEvents(String query) async {
     try {
       final now = DateTime.now().toUtc();
+      final threeMonthsAgo = now.subtract(const Duration(days: 90));
       final events = await _api.events.list(
         'primary',
-        timeMin: now,
+        timeMin: threeMonthsAgo,
         q: query,
         maxResults: 50,
         singleEvents: true,
