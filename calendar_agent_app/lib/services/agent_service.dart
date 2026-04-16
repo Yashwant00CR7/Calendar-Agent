@@ -21,15 +21,15 @@ abstract class AgentApiException implements Exception {
 }
 
 class RateLimitException extends AgentApiException {
-  RateLimitException([String msg = 'Rate limit exceeded (429). Please wait a moment.', int? code = 429]) : super(msg, code);
+  RateLimitException([super.msg = 'Rate limit exceeded (429). Please wait a moment.', super.code = 429]);
 }
 
 class InvalidCredentialsException extends AgentApiException {
-  InvalidCredentialsException([String msg = 'Invalid API key or unauthorized (401/403).', int? code = 401]) : super(msg, code);
+  InvalidCredentialsException([super.msg = 'Invalid API key or unauthorized (401/403).', super.code = 401]);
 }
 
 class AgentBadRequestException extends AgentApiException {
-  AgentBadRequestException(String msg, [int? code = 400]) : super(msg, code);
+  AgentBadRequestException(super.msg, [super.code = 400]);
 }
 
 class AgentService {
