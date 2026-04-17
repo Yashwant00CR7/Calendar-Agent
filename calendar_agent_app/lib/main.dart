@@ -405,12 +405,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients)
+      if (_scrollController.hasClients) {
         _scrollController.animateTo(
           _scrollController.position.maxScrollExtent,
           duration: const Duration(milliseconds: 500),
           curve: Curves.easeInOutQuart,
         );
+      }
     });
   }
 
@@ -462,6 +463,10 @@ class _ChatScreenState extends State<ChatScreen> {
               ? 'groq_api_key'
               : 'openrouter_api_key';
       final key = await storage.read(key: '${keyName}_${widget.email}');
+      final geminiKey = await storage.read(
+        key: 'gemini_api_key_${widget.email}',
+      );
+
       if (key == null || key.isEmpty) {
         setState(
           () => _messages.add(
@@ -477,6 +482,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final agent = AgentService(
         provider: _selectedProvider,
         apiKey: key,
+        geminiApiKey: geminiKey,
         userEmail: widget.email,
         modelId: _selectedModel,
         sessionId: _currentSessionId,
@@ -504,6 +510,78 @@ class _ChatScreenState extends State<ChatScreen> {
     } finally {
       setState(() => _isLoading = false);
       _scrollToBottom();
+    }
+  }
+
+  void _startNewChat() {
+    setState(() {
+      _currentSessionId = DateTime.now().millisecondsSinceEpoch.toString();
+      _messages.clear();
+      _showHistory = false;
+      _showVault = false;
+      _showSettings = false;
+    });
+    _loadSessions();
+  }
+
+  Future<void> _handleQuickSave() async {
+    setState(() => _isLoading = true);
+    try {
+      final storage = const FlutterSecureStorage();
+      final keyName =
+          _selectedProvider == LLMProvider.gemini
+              ? 'gemini_api_key'
+              : _selectedProvider == LLMProvider.groq
+              ? 'groq_api_key'
+              : 'openrouter_api_key';
+      final key = await storage.read(key: '${keyName}_${widget.email}');
+      final geminiKey = await storage.read(
+        key: 'gemini_api_key_${widget.email}',
+      );
+
+      if (key == null || key.isEmpty) {
+        throw Exception("API Key missing");
+      }
+
+      final agent = AgentService(
+        provider: _selectedProvider,
+        apiKey: key,
+        geminiApiKey: geminiKey,
+        userEmail: widget.email,
+        modelId: _selectedModel,
+        sessionId: _currentSessionId,
+        account: widget.googleSignIn.currentUser,
+      );
+
+      final result = await agent.takeContextSnapshot();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              result,
+              style: const TextStyle(
+                color: Colors.black,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            backgroundColor: Colors.cyanAccent,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text("Snapshot error: $e")));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
@@ -616,7 +694,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _buildTopHUD(ThemeData theme, bool isDark) {
     return Container(
       height: 120,
-      padding: const EdgeInsets.fromLTRB(20, 60, 20, 20),
+      padding: const EdgeInsets.fromLTRB(12, 60, 12, 20),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
@@ -628,35 +706,32 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
       ),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
           _HUDIconButton(
             icon: Icons.menu_open,
             glow: _showHistory,
             onPressed: () => setState(() => _showHistory = true),
           ),
-          Row(
-            children: [
-              _HUDIconButton(
-                icon: Icons.psychology_outlined,
-                glow: _showVault,
-                onPressed: () => setState(() => _showVault = true),
-              ),
-              const SizedBox(width: 8),
-              _HUDIconButton(
-                icon:
-                    isDark
-                        ? Icons.light_mode_outlined
-                        : Icons.dark_mode_outlined,
-                onPressed: widget.onToggleTheme,
-              ),
-              const SizedBox(width: 8),
-              _HUDIconButton(
-                icon: Icons.settings_outlined,
-                glow: _showSettings,
-                onPressed: () => setState(() => _showSettings = true),
-              ),
-            ],
+          _HUDIconButton(icon: Icons.add, onPressed: _startNewChat),
+          _HUDIconButton(
+            icon: Icons.bookmark_outline,
+            glow: true,
+            onPressed: _handleQuickSave,
+          ),
+          _HUDIconButton(
+            icon: Icons.psychology_outlined,
+            glow: _showVault,
+            onPressed: () => setState(() => _showVault = true),
+          ),
+          _HUDIconButton(
+            icon: isDark ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
+            onPressed: widget.onToggleTheme,
+          ),
+          _HUDIconButton(
+            icon: Icons.settings_outlined,
+            glow: _showSettings,
+            onPressed: () => setState(() => _showSettings = true),
           ),
         ],
       ),
@@ -674,6 +749,7 @@ class _ChatScreenState extends State<ChatScreen> {
           title: Text(
             session['title'] ?? 'Untitled Chat',
             style: TextStyle(
+              fontSize: 14,
               color:
                   isSelected
                       ? (isDark ? Colors.cyanAccent : Colors.blueAccent)
@@ -683,7 +759,7 @@ class _ChatScreenState extends State<ChatScreen> {
           trailing: IconButton(
             icon: const Icon(
               Icons.delete_outline,
-              size: 18,
+              size: 16,
               color: Colors.redAccent,
             ),
             onPressed:
@@ -725,7 +801,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
 
     setState(() => _showSettings = false);
-    if (mounted)
+    if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('System Config Updated'),
@@ -733,6 +809,7 @@ class _ChatScreenState extends State<ChatScreen> {
           behavior: SnackBarBehavior.floating,
         ),
       );
+    }
   }
 
   Future<void> _handleGoogleAuthSync() async {
@@ -744,198 +821,326 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _isGoogleLinked = widget.googleSignIn.currentUser != null);
   }
 
+  Widget _buildPulseButton({
+    required String label,
+    required VoidCallback onPressed,
+    required bool isDark,
+    bool isPrimary = false,
+  }) {
+    final theme = Theme.of(context);
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(100),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF00F0FF).withValues(alpha: isPrimary ? 0.2 : 0.1),
+            blurRadius: isPrimary ? 20 : 12,
+            spreadRadius: isPrimary ? 2 : 0,
+          ),
+          if (isPrimary)
+            BoxShadow(
+              color: const Color(0xFF008080).withValues(alpha: 0.15),
+              blurRadius: 25,
+              spreadRadius: 4,
+            ),
+        ],
+      ),
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(100),
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFF00F0FF), Color(0xFF008080)],
+          ),
+        ),
+        padding: const EdgeInsets.all(1.5), // Technical glow-border
+        child: Container(
+          decoration: BoxDecoration(
+            color: theme.scaffoldBackgroundColor,
+            borderRadius: BorderRadius.circular(100),
+          ),
+          child: ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.transparent,
+              shadowColor: Colors.transparent,
+              foregroundColor: isDark ? Colors.white : Colors.black,
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(100),
+              ),
+              minimumSize: const Size(120, 44),
+            ),
+            onPressed: onPressed,
+            child: Text(
+              label,
+              style: GoogleFonts.spaceGrotesk(
+                fontSize: 11,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 2.5,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAtmosphericTier({required Widget child, required bool isDark}) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color:
+            isDark
+                ? Colors.white.withValues(alpha: 0.02)
+                : Colors.black.withValues(alpha: 0.02),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: child,
+    );
+  }
+
+  Widget _buildEnergizedGhostInput({
+    required String label,
+    required TextEditingController controller,
+    required bool isDark,
+    bool obscureText = true,
+  }) {
+    return Focus(
+      child: Builder(
+        builder: (context) {
+          final isFocused = Focus.of(context).hasFocus;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: GoogleFonts.spaceGrotesk(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1.5,
+                  color: isDark ? Colors.white38 : Colors.black38,
+                ),
+              ),
+              const SizedBox(height: 8),
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color:
+                        isFocused
+                            ? const Color(0xFF00F0FF)
+                            : (isDark ? Colors.white10 : Colors.black12),
+                    width: 1.5,
+                  ),
+                  boxShadow: [
+                    if (isFocused)
+                      BoxShadow(
+                        color: const Color(0xFF00F0FF).withValues(alpha: 0.2),
+                        blurRadius: 10,
+                        spreadRadius: 2,
+                      ),
+                  ],
+                ),
+                child: TextField(
+                  controller: controller,
+                  obscureText: obscureText,
+                  style: GoogleFonts.manrope(
+                    fontSize: 12,
+                    color: isDark ? Colors.white : Colors.black,
+                  ),
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 14,
+                    ),
+                    border: InputBorder.none,
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   Widget _buildSettingsPanel(ThemeData theme) {
     final isDark = widget.isDark;
-    final accentColor = isDark ? Colors.cyanAccent : Colors.blueAccent;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 1. LLM ARCHITECTURE
-          _buildHUDSectionTitle('LLM ARCHITECTURE', theme),
-          Row(
-            children: [
-              Expanded(
-                child: _buildHUDDropdown<LLMProvider>(
-                  label: 'PROVIDER',
-                  value: _selectedProvider,
-                  items:
-                      LLMProvider.values
-                          .map(
-                            (p) => DropdownMenuItem(
-                              value: p,
-                              child: Text(p.name.toUpperCase()),
-                            ),
-                          )
-                          .toList(),
-                  onChanged: (val) {
-                    if (val != null)
-                      setState(() {
-                        _selectedProvider = val;
-                        _selectedModel = _modelPresets[val]!.first;
-                      });
-                  },
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _buildHUDDropdown<String>(
-                  label: 'MODEL',
-                  value: _selectedModel,
-                  items:
-                      _modelPresets[_selectedProvider]!
-                          .map(
-                            (m) => DropdownMenuItem(
-                              value: m,
-                              child: Text(m.split('/').last.toUpperCase()),
-                            ),
-                          )
-                          .toList(),
-                  onChanged: (val) {
-                    if (val != null) setState(() => _selectedModel = val);
-                  },
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 32),
-
-          // 2. API VAULT
-          _buildHUDSectionTitle('API VAULT', theme),
-          _buildApiKeyField(
-            label: 'GEMINI KEY',
-            controller: _geminiKeyController,
+          // [01] CORE.ROUTER
+          _buildHUDSectionTitle('[01] CORE.ROUTER', theme),
+          _buildAtmosphericTier(
             isDark: isDark,
-          ),
-          const SizedBox(height: 16),
-          _buildApiKeyField(
-            label: 'GROQ KEY',
-            controller: _groqKeyController,
-            isDark: isDark,
-          ),
-          const SizedBox(height: 16),
-          _buildApiKeyField(
-            label: 'OPENROUTER KEY',
-            controller: _openRouterKeyController,
-            isDark: isDark,
-          ),
-          const SizedBox(height: 32),
-
-          // 3. SYSTEM AUTH
-          _buildHUDSectionTitle('SYSTEM AUTH', theme),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color:
-                  isDark
-                      ? Colors.white.withValues(alpha: 0.05)
-                      : Colors.black.withValues(alpha: 0.05),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: isDark ? Colors.white10 : Colors.black12,
-              ),
-            ),
             child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'GOOGLE CALENDAR',
-                      style: GoogleFonts.manrope(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: isDark ? Colors.white70 : Colors.black54,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Row(
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color:
-                                _isGoogleLinked
-                                    ? Colors.greenAccent
-                                    : Colors.redAccent,
-                            boxShadow: [
-                              if (_isGoogleLinked)
-                                BoxShadow(
-                                  color: Colors.greenAccent.withValues(
-                                    alpha: 0.4,
-                                  ),
-                                  blurRadius: 8,
-                                ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          _isGoogleLinked ? 'LINKED' : 'DISCONNECTED',
-                          style: GoogleFonts.spaceGrotesk(
-                            fontSize: 10,
-                            letterSpacing: 1,
-                            color:
-                                _isGoogleLinked
-                                    ? Colors.greenAccent
-                                    : Colors.redAccent,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-                TextButton.icon(
-                  onPressed: _handleGoogleAuthSync,
-                  icon: Icon(
-                    _isGoogleLinked ? Icons.link_off : Icons.link,
-                    size: 16,
-                    color: accentColor,
+                Expanded(
+                  child: _buildHUDDropdown<LLMProvider>(
+                    label: 'PROVIDER',
+                    value: _selectedProvider,
+                    items:
+                        LLMProvider.values
+                            .map(
+                              (p) => DropdownMenuItem(
+                                value: p,
+                                child: Text(p.name.toUpperCase()),
+                              ),
+                            )
+                            .toList(),
+                    onChanged: (val) {
+                      if (val != null) {
+                        setState(() {
+                          _selectedProvider = val;
+                          _selectedModel = _modelPresets[val]!.first;
+                        });
+                      }
+                    },
                   ),
-                  label: Text(
-                    _isGoogleLinked ? 'UNLINK' : 'CONNECT',
-                    style: TextStyle(
-                      color: accentColor,
-                      fontWeight: FontWeight.bold,
-                    ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _buildHUDDropdown<String>(
+                    label: 'MODEL',
+                    value: _selectedModel,
+                    items:
+                        _modelPresets[_selectedProvider]!
+                            .map(
+                              (m) => DropdownMenuItem(
+                                value: m,
+                                child: Text(m.split('/').last.toUpperCase()),
+                              ),
+                            )
+                            .toList(),
+                    onChanged: (val) {
+                      if (val != null) setState(() => _selectedModel = val);
+                    },
                   ),
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 48),
 
-          // 4. PERSISTENCE ACTIONS
+          // [02] SECURE.LAYER
+          _buildHUDSectionTitle('[02] SECURE.LAYER', theme),
+          _buildAtmosphericTier(
+            isDark: isDark,
+            child: Column(
+              children: [
+                _buildEnergizedGhostInput(
+                  label: 'GEMINI COMMANDER',
+                  controller: _geminiKeyController,
+                  isDark: isDark,
+                ),
+                const SizedBox(height: 20),
+                _buildEnergizedGhostInput(
+                  label: 'GROQ CORE',
+                  controller: _groqKeyController,
+                  isDark: isDark,
+                ),
+                const SizedBox(height: 20),
+                _buildEnergizedGhostInput(
+                  label: 'ROUTER SHIELD',
+                  controller: _openRouterKeyController,
+                  isDark: isDark,
+                ),
+              ],
+            ),
+          ),
+
+          // [03] CLOUD.SYNC
+          _buildHUDSectionTitle('[03] CLOUD.SYNC', theme),
+          _buildAtmosphericTier(
+            isDark: isDark,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'PULSE AUTH',
+                        style: GoogleFonts.spaceGrotesk(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 2,
+                          color: isDark ? Colors.white38 : Colors.black38,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Container(
+                            width: 8,
+                            height: 8,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color:
+                                  _isGoogleLinked
+                                      ? Colors.cyanAccent
+                                      : Colors.redAccent,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: (_isGoogleLinked
+                                          ? Colors.cyanAccent
+                                          : Colors.redAccent)
+                                      .withValues(alpha: 0.4),
+                                  blurRadius: 8,
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Flexible(
+                            child: Text(
+                              _isGoogleLinked ? 'ACTIVE' : 'OFFLINE',
+                              style: GoogleFonts.spaceGrotesk(
+                                fontSize: 10,
+                                letterSpacing: 2,
+                                fontWeight: FontWeight.bold,
+                                color:
+                                    _isGoogleLinked
+                                        ? Colors.cyanAccent
+                                        : Colors.redAccent,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 16),
+                _buildPulseButton(
+                  label: _isGoogleLinked ? 'DISCONNECT' : 'AUTHORIZE',
+                  onPressed: _handleGoogleAuthSync,
+                  isDark: isDark,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 32),
+
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               _HUDIconButton(icon: Icons.logout, onPressed: widget.onLogout),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: accentColor,
-                  foregroundColor: isDark ? Colors.black : Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 40,
-                    vertical: 16,
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  elevation: 8,
-                  shadowColor: accentColor.withValues(alpha: 0.5),
-                ),
-                onPressed: _saveSettings,
-                child: Text(
-                  'SYNC & LOCK',
-                  style: GoogleFonts.spaceGrotesk(
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 1.5,
-                  ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: _buildPulseButton(
+                  label: 'SYNC & LOCK',
+                  onPressed: _saveSettings,
+                  isDark: isDark,
+                  isPrimary: true,
                 ),
               ),
             ],
@@ -947,13 +1152,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _buildHUDSectionTitle(String title, ThemeData theme) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.only(left: 8, bottom: 8),
       child: Text(
-        title,
-        style: theme.textTheme.labelSmall?.copyWith(
-          letterSpacing: 2,
-          fontWeight: FontWeight.bold,
-          color: widget.isDark ? Colors.white38 : Colors.black38,
+        title.toUpperCase(),
+        style: GoogleFonts.spaceGrotesk(
+          fontSize: 11,
+          fontWeight: FontWeight.w900,
+          letterSpacing: 3.0,
+          color: widget.isDark ? Colors.white70 : Colors.black87,
         ),
       ),
     );
@@ -984,61 +1190,10 @@ class _ChatScreenState extends State<ChatScreen> {
             onChanged: onChanged,
             dropdownColor: isDark ? const Color(0xFF16161D) : Colors.white,
             style: GoogleFonts.spaceGrotesk(
-              fontSize: 13,
+              fontSize: 12,
               color: isDark ? Colors.white : Colors.black87,
             ),
             icon: const Icon(Icons.keyboard_arrow_down, size: 16),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildApiKeyField({
-    required String label,
-    required TextEditingController controller,
-    required bool isDark,
-  }) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label,
-          style: const TextStyle(
-            fontSize: 9,
-            fontWeight: FontWeight.bold,
-            color: Colors.white24,
-          ),
-        ),
-        const SizedBox(height: 4),
-        TextField(
-          controller: controller,
-          obscureText: true,
-          style: GoogleFonts.manrope(fontSize: 12),
-          decoration: InputDecoration(
-            isDense: true,
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 16,
-              vertical: 12,
-            ),
-            filled: true,
-            fillColor:
-                isDark
-                    ? Colors.white.withValues(alpha: 0.05)
-                    : Colors.black.withValues(alpha: 0.05),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: BorderSide(
-                color: isDark ? Colors.white10 : Colors.black12,
-              ),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: BorderSide(
-                color: (isDark ? Colors.cyanAccent : Colors.blueAccent)
-                    .withValues(alpha: 0.5),
-              ),
-            ),
           ),
         ),
       ],
@@ -1054,10 +1209,11 @@ class _ChatScreenState extends State<ChatScreen> {
       message.text,
       key,
     );
-    if (mounted)
+    if (mounted) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(result)));
+    }
   }
 }
 
@@ -1199,14 +1355,11 @@ class _HUDIconButton extends StatelessWidget {
         ],
       ),
       child: IconButton(
-        icon: Icon(icon, size: 20, color: glow ? accentColor : null),
+        icon: Icon(icon, size: 18, color: glow ? accentColor : null),
         onPressed: onPressed,
+        constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
         style: IconButton.styleFrom(
           backgroundColor: theme.scaffoldBackgroundColor.withValues(alpha: 0.8),
-          side: BorderSide(
-            color:
-                glow ? accentColor.withValues(alpha: 0.5) : theme.dividerColor,
-          ),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
           ),
@@ -1237,13 +1390,13 @@ class _HUDPanel extends StatelessWidget {
         child: Container(
           color: Colors.black45,
           child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+            filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
             child: Center(
               child: GestureDetector(
                 onTap: () {},
                 child: Container(
-                  width: MediaQuery.of(context).size.width * 0.85,
-                  height: MediaQuery.of(context).size.height * 0.7,
+                  width: MediaQuery.of(context).size.width * 0.75,
+                  height: MediaQuery.of(context).size.height * 0.6,
                   decoration: BoxDecoration(
                     color:
                         isDark
@@ -1252,7 +1405,7 @@ class _HUDPanel extends StatelessWidget {
                     borderRadius: BorderRadius.circular(28),
                     border: Border.all(
                       color: (isDark ? Colors.cyanAccent : Colors.blueAccent)
-                          .withValues(alpha: 0.15),
+                          .withValues(alpha: 0.08),
                     ),
                     boxShadow: [
                       BoxShadow(
@@ -1269,13 +1422,16 @@ class _HUDPanel extends StatelessWidget {
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            Text(
-                              title,
-                              style: GoogleFonts.spaceGrotesk(
-                                fontSize: 20,
-                                fontWeight: FontWeight.bold,
-                                letterSpacing: 4,
-                                color: isDark ? Colors.white : Colors.black,
+                            Padding(
+                              padding: const EdgeInsets.only(left: 8),
+                              child: Text(
+                                title,
+                                style: GoogleFonts.spaceGrotesk(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 6,
+                                  color: isDark ? Colors.white : Colors.black,
+                                ),
                               ),
                             ),
                             _HUDIconButton(
@@ -1285,7 +1441,7 @@ class _HUDPanel extends StatelessWidget {
                           ],
                         ),
                       ),
-                      const Divider(indent: 24, endIndent: 24),
+                      const SizedBox(height: 8),
                       Expanded(child: child),
                     ],
                   ),
@@ -1430,10 +1586,11 @@ class _MemoryVaultHUDState extends State<MemoryVaultHUD> {
   @override
   Widget build(BuildContext context) {
     if (_isLoading) return const Center(child: CircularProgressIndicator());
-    if (_memories.isEmpty)
+    if (_memories.isEmpty) {
       return const Center(
         child: Text('Empty Vault', style: TextStyle(color: Colors.white24)),
       );
+    }
     return ListView.builder(
       padding: const EdgeInsets.all(24),
       itemCount: _memories.length,

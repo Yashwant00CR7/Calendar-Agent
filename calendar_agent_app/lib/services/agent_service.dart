@@ -31,10 +31,10 @@ class InvalidCredentialsException extends AgentApiException {
 class AgentBadRequestException extends AgentApiException {
   AgentBadRequestException(super.msg, [super.code = 400]);
 }
-
 class AgentService {
   final LLMProvider provider;
   final String apiKey;
+  final String? geminiApiKey;
   final GoogleSignInAccount? account;
   final String userEmail;
   final String modelId;
@@ -43,6 +43,7 @@ class AgentService {
   AgentService({
     this.provider = LLMProvider.gemini,
     required this.apiKey,
+    this.geminiApiKey,
     required String userEmail,
     required this.modelId,
     required this.sessionId,
@@ -110,6 +111,17 @@ class AgentService {
       if (mimeType != null) "mime_type": mimeType,
     });
     
+    // 4. PASIVE MEMORY SYNC: Every 5 turns
+    final turnCountKey = 'turn_count_$sessionId';
+    int turnCount = prefs.getInt(turnCountKey) ?? 0;
+    turnCount++;
+    await prefs.setInt(turnCountKey, turnCount);
+    
+    if (turnCount % 5 == 0) {
+      debugPrint("Triggering Passive Context Snapshot (Turn $turnCount)...");
+      takeContextSnapshot(); // Non-blocking
+    }
+
     // Keep a reasonable context window
     if (historyList.length > 8) {
       historyList.removeAt(0);
@@ -485,6 +497,13 @@ class AgentService {
   }
 
   Future<String> _executeTool(String name, Map<String, dynamic> args, CalendarService calendarService) async {
+    // PASSIVE MEMORY SAFETY CHECK
+    if (name == 'save_to_personal_memory_tool' || name == 'query_personal_memory_tool') {
+      if (geminiApiKey == null || geminiApiKey!.trim().isEmpty) {
+        return "SYSTEM MESSAGE: Memory tool failed. RAG operations require a dedicated Gemini API Key even when using other providers. Please add one in System Config.";
+      }
+    }
+
     switch (name) {
       case 'schedule_event_tool':
         return await calendarService.createEvent(
@@ -513,7 +532,7 @@ class AgentService {
         return await MemoryService.indexDocument(
           userEmail, 
           refinedContent, 
-          apiKey,
+          geminiApiKey!, 
           sourceType: sourceType,
           metadata: {
             'original_text': contentToSave,
@@ -521,7 +540,7 @@ class AgentService {
           },
         );
       case 'query_personal_memory_tool':
-        return await MemoryService.queryMemory(userEmail, args['query'].toString(), apiKey);
+        return await MemoryService.queryMemory(userEmail, args['query'].toString(), geminiApiKey!);
       case 'web_search_tool':
         return await _performWebSearch(args['query'].toString());
       default:
@@ -533,17 +552,17 @@ class AgentService {
     return '''
 ### DIRECTIVES
 - **Context Awareness**: Today is ${DateTime.now().toString()}. Use device-local timezone.
+- **Proactive Retrieval**: ALWAYS query `query_personal_memory_tool` first for any user preferences, history, or past interactions to ensure a personalized experience—not just for file context. 
 - **Proactive Scheduling**: Parse documents (Images/PDFs) to identify "Single Events" vs "Timetables".
 - **Conflict Vigilance**: Always call `list_upcoming_events_tool` before scheduling any new events.
 - **Ambiguity Gate**: Ask clarifying questions before bulk-scheduling if data is unclear.
 - **Visual Callouts**: Use bold 🚨 **CONFLICT DETECTED** 🚨 for overlapping events.
-- **Memory Autonomy**: Query `query_personal_memory_tool` for past file context before asking user.
 - **Resolution**: Use `overwrite: true` only if user asks to "replace", "fix", or "overwrite" a conflict.
 
 ### CONSTRAINTS
 - **Access Authority**: Never claim you lack access to the calendar. Use tools.
 - **Privacy**: Never share or index data across user boundaries.
-- **Manual Memory**: ONLY `save_to_personal_memory_tool` if user says "remember this" or "save this".
+- **Autonomous Memory**: Automatically identify and save durable user preferences, recurring habits, and life-facts using the save_to_personal_memory_tool as they emerge in conversation. Do not wait for explicit permission to remember important details.
 - **Minimal Preamble**: Do not explain your tools; just execute and provide a clear summary.
 
 ### FORMATTING
@@ -641,11 +660,12 @@ class AgentService {
   }
 
   Future<String> _refineMemoryContent(String content) async {
+    if (geminiApiKey == null || geminiApiKey!.trim().isEmpty) return content;
     try {
-      // Use the existing provider settings for refinement
+      // Use the designated Gemini key and a reliable model for refinement
       final model = GenerativeModel(
-        model: modelId,
-        apiKey: apiKey,
+        model: 'gemini-2.5-flash',
+        apiKey: geminiApiKey!,
       );
       
       final prompt = '''
@@ -670,5 +690,75 @@ CLEAN FACT:''';
       debugPrint("Refinement failed: $e. Using original content.");
       return content;
     }
+  }
+
+  /// Background LLM caller strictly using the Gemini key for passive tasks
+  Future<String> _generateBackgroundLLMResponse(String prompt) async {
+    try {
+      if (geminiApiKey == null || geminiApiKey!.trim().isEmpty) return "";
+      final model = GenerativeModel(model: 'gemini-2.5-flash', apiKey: geminiApiKey!);
+      final response = await model.generateContent([Content.text(prompt)]);
+      return response.text ?? "";
+    } catch (e) {
+      debugPrint("Background LLM Error: $e");
+      return "";
+    }
+  }
+
+
+
+  Future<String> takeContextSnapshot() async {
+    if (geminiApiKey == null || geminiApiKey!.trim().isEmpty) return "SKIPPED: No Gemini API Key for background task.";
+
+    final prefs = await SharedPreferences.getInstance();
+    final String rawHistory =
+        prefs.getString('chat_history_$sessionId') ?? '[]';
+    final List<dynamic> historyList = jsonDecode(rawHistory);
+
+    if (historyList.isEmpty) return "No history to snapshot.";
+
+    final prompt = """
+DETAILED CONTEXT SNAPSHOT & DEDUPLICATION TASK:
+Below is a chat history. For EVERY significant turn (User + AI exchange), extract exactly ONE atomic, declarative fact that is worth remembering.
+
+RULES:
+1) If a turn is purely conversational (greetings, 'ok', 'thanks', 'how are you'), output 'SKIP'.
+2) DEDUPLICATION: If a fact is redundant or has already been captured in an earlier turn of this history, output 'SKIP'. Focus ONLY on new, durable preferences or life-facts.
+
+FORMAT:
+Output the results as a bulleted list.
+- Fact 1 or SKIP
+- Fact 2 or SKIP
+
+HISTORY:
+${historyList.asMap().entries.map((e) => "TURN ${e.key + 1}:\nUser: ${e.value['user']}\nAI: ${e.value['ai']}").join("\n\n")}
+""";
+
+    String result = await _generateBackgroundLLMResponse(prompt);
+    List<String> facts =
+        result
+            .split('\n')
+            .where((l) => l.trim().startsWith('-'))
+            .map((l) => l.replaceFirst('-', '').trim())
+            .where((l) => l.toUpperCase() != 'SKIP' && l.isNotEmpty)
+            .toList();
+
+    int indexedCount = 0;
+    for (var fact in facts) {
+      try {
+        await MemoryService.indexDocument(
+          userEmail,
+          fact,
+          geminiApiKey!,
+          sourceType: 'Personal',
+          metadata: {'session_id': sessionId, 'type': 'snapshot_turn'},
+        );
+        indexedCount++;
+      } catch (e) {
+        debugPrint("Failed to index snapshot fact: $e");
+      }
+    }
+
+    return "SNAPSHOT COMPLETE: $indexedCount significant facts indexed.";
   }
 }

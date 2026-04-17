@@ -74,36 +74,55 @@ class MemoryService {
   }
 
   static Future<List<double>> _getEmbedding(String text, String apiKey) async {
-    final models = ['text-embedding-005', 'gemini-embedding-001', 'embedding-001'];
-    
+    if (apiKey.isEmpty) {
+      throw Exception(
+          "SYSTEM ACTION REQUIRED: Missing Gemini API key for memory operations. Please configure it in System Config.");
+    }
+
+    final models = [
+      'text-embedding-005',
+      'gemini-embedding-001',
+      'embedding-001'
+    ];
+
     for (String modelName in models) {
       try {
         final url = Uri.parse(_getEndpoint('embed', modelName, apiKey));
         final body = jsonEncode({
           "model": "models/$modelName",
           "content": {
-            "parts": [{"text": text}]
+            "parts": [
+              {"text": text}
+            ]
           }
         });
 
-        final response = await http.post(
-          url,
-          headers: {'Content-Type': 'application/json'},
-          body: body,
-        ).timeout(const Duration(seconds: 10));
+        final response = await http
+            .post(
+              url,
+              headers: {'Content-Type': 'application/json'},
+              body: body,
+            )
+            .timeout(const Duration(seconds: 10));
 
         if (response.statusCode == 200) {
           final json = jsonDecode(response.body);
           final List<dynamic> values = json['embedding']['values'];
           activeModel = modelName; // Update diagnostic tracker
           return values.map((e) => (e as num).toDouble()).toList();
+        } else if (response.statusCode == 401 || response.statusCode == 403) {
+          throw Exception(
+              "SYSTEM ACTION REQUIRED: Invalid or unauthorized Gemini API key for memory. Check your key in System Config.");
         } else if (response.statusCode == 404 || response.statusCode == 400) {
-          debugPrint("Embed Model $modelName failed with ${response.statusCode}, falling back...");
+          debugPrint(
+              "Embed Model $modelName failed with ${response.statusCode}, falling back...");
           continue;
         } else {
-          throw Exception("Embed HTTP Error ${response.statusCode}: ${response.body}");
+          throw Exception(
+              "Embed HTTP Error ${response.statusCode}: ${response.body}");
         }
       } catch (e) {
+        if (e.toString().contains("SYSTEM ACTION REQUIRED")) rethrow;
         if (modelName == models.last) {
           rethrow;
         }
@@ -115,7 +134,7 @@ class MemoryService {
 
   static Future<String> _refineContent(String text, String apiKey) async {
     try {
-      final url = Uri.parse(_getEndpoint('generate', 'gemini-1.5-flash', apiKey));
+      final url = Uri.parse(_getEndpoint('generate', 'gemini-2.5-flash', apiKey));
       final body = jsonEncode({
         "contents": [{
           "parts": [{
@@ -153,36 +172,43 @@ class MemoryService {
   }
 
   static Future<String> indexDocument(
-    String userId, 
-    String content, 
+    String userId,
+    String content,
     String apiKey, {
     String sourceType = 'Personal',
     Map<String, dynamic>? metadata,
   }) async {
-    final db = await database;
-    final normalizedUserId = userId.trim().toLowerCase();
-    
-    final refinedContent = await _refineContent(content, apiKey);
-    final chunks = _chunkText(refinedContent);
-    if (chunks.isEmpty) {
-      chunks.add(refinedContent);
+    try {
+      final db = await database;
+      final normalizedUserId = userId.trim().toLowerCase();
+
+      final refinedContent = await _refineContent(content, apiKey);
+      final chunks = _chunkText(refinedContent);
+      if (chunks.isEmpty) {
+        chunks.add(refinedContent);
+      }
+
+      int count = 0;
+      for (var chunk in chunks) {
+        final embedding = await _getEmbedding(chunk, apiKey);
+        await db.insert(tableName, {
+          'user_id': normalizedUserId,
+          'content': chunk,
+          'embedding_json': jsonEncode(embedding),
+          'metadata_json': jsonEncode(metadata ?? {}),
+          'source_type': sourceType,
+          'model_version': activeModel,
+          'created_at': DateTime.now().toIso8601String(),
+        });
+        count++;
+      }
+      return "SUCCESS: Saved $count memory pieces securely.";
+    } catch (e) {
+      if (e.toString().contains("SYSTEM ACTION REQUIRED")) {
+        return e.toString();
+      }
+      return "Memory indexing failed: $e";
     }
-    
-    int count = 0;
-    for (var chunk in chunks) {
-      final embedding = await _getEmbedding(chunk, apiKey);
-      await db.insert(tableName, {
-        'user_id': normalizedUserId,
-        'content': chunk,
-        'embedding_json': jsonEncode(embedding),
-        'metadata_json': jsonEncode(metadata ?? {}),
-        'source_type': sourceType,
-        'model_version': activeModel,
-        'created_at': DateTime.now().toIso8601String(),
-      });
-      count++;
-    }
-    return "SUCCESS: Saved $count memory pieces securely.";
   }
 
   static Future<List<Map<String, dynamic>>> getAllMemories(String userId) async {
@@ -205,12 +231,13 @@ class MemoryService {
     );
   }
 
-  static Future<String> queryMemory(String userId, String query, String apiKey) async {
+  static Future<String> queryMemory(
+      String userId, String query, String apiKey) async {
     final db = await database;
     final normalizedUserId = userId.trim().toLowerCase();
     try {
       final queryEmbedding = await _getEmbedding(query, apiKey);
-      
+
       final List<Map<String, dynamic>> maps = await db.query(
         tableName,
         where: 'user_id = ?',
@@ -224,7 +251,8 @@ class MemoryService {
       List<Map<String, dynamic>> scoredMemories = [];
       for (var map in maps) {
         List<dynamic> jsonList = jsonDecode(map['embedding_json']);
-        List<double> embedding = jsonList.map((e) => (e as num).toDouble()).toList();
+        List<double> embedding =
+            jsonList.map((e) => (e as num).toDouble()).toList();
         double score = _cosineSimilarity(queryEmbedding, embedding);
         scoredMemories.add({
           'content': map['content'],
@@ -232,24 +260,29 @@ class MemoryService {
         });
       }
 
-      scoredMemories.sort((a, b) => (b['score'] as double).compareTo(a['score'] as double));
-      
+      scoredMemories
+          .sort((a, b) => (b['score'] as double).compareTo(a['score'] as double));
+
       // Take top 3
       final topK = scoredMemories.take(3).toList();
-      String result = "RETRIEVED PERSONAL MEMORIES (Use this context to answer the user!):\n";
+      String result =
+          "RETRIEVED PERSONAL MEMORIES (Use this context to answer the user!):\n";
       bool found = false;
       for (var memory in topK) {
         if ((memory['score'] as double) > 0.4) {
-           result += "- ${memory['content']}\n";
-           found = true;
+          result += "- ${memory['content']}\n";
+          found = true;
         }
       }
-      
+
       if (!found) {
-         return "NO RELEVANT MEMORY FOUND for this specific query.";
+        return "NO RELEVANT MEMORY FOUND for this specific query.";
       }
       return result;
     } catch (e) {
+      if (e.toString().contains("SYSTEM ACTION REQUIRED")) {
+        return e.toString();
+      }
       return "Memory search failed: $e";
     }
   }
