@@ -1,56 +1,27 @@
 # Calendar AI Agent - Release Notes
 
-**Version:** 1.0.0  
-**Release Date:** April 12, 2026
+**Version:** 2.0.0  
+**Release Date:** April 18, 2026
 
-## What’s New
+## What’s New (The HUD Upgrade)
 
-1. Introduced a full Flutter mobile app experience for Calendar AI.
-2. Added Google Sign-In based onboarding and session handling.
-3. Added AI-powered chat assistant for scheduling and calendar tasks.
-4. Added support for smart intent routing between search-style and calendar-style requests.
-5. Added personalized chat memory per signed-in user.
+1. **Micro-Minimalist Cockpit**: Overhauled the core UI into a glassmorphic "HUD" dashboard with mathematical icon symmetry and editorial typography (Inter/Space Grotesk).
+2. **Autonomous Memory Engine**: Transitioned from manual state-saving to a passive background observer that automatically indexes facts, preferences, and context snapshots into the personal vault.
+3. **Decoupled Security Layer**: Implemented a "Multi-Key" architecture, allowing users to use separate providers (Groq/OpenRouter) for chat while keeping Gemini restricted to high-reliability Memory/RAG tasks.
+4. **System Core Dashboard**: Integrated a new 3-tab configuration HUD ([ROUTER], [SECURITY], [SYNC]) for high-density settings management.
+5. **Atmospheric Aesthetics**: Introduced "Cyber-Arctic" glowing borders, deep backdrop blurs (30.0 sigma), and harmonized color palettes to eliminate "Neon Burn."
 
 ## Core Features
-
-1. Calendar event creation via natural language.
-2. Upcoming events listing (top 10) from Google Calendar.
-3. Event deletion flow via AI function-calling.
-4. Duplicate event detection to prevent repeat inserts.
-5. Optional event metadata support:
-   - Location
-   - Description
-   - Color categories
-   - Invitee email list
-6. Reminder defaults for created events (popup reminder).
+1. **Intelligent Intent Routing**: Mathematical separation between standard research and calendar management.
+2. **Personal Knowledge Vault**: Secure, RAG-powered memory that persists across sessions.
+3. **Proactive Calendar Logic**: Expanded search windows (90 days) and automated duplicate checking during creation.
 
 ## Authentication & Security
+1. **BYOK (Bring Your Own Key)**: Full support for personal API keys across major providers.
+2. **Pulse Auth Sync**: Real-time Google Account connection status with animated heartbeat indicators.
 
-1. Google OAuth integration for account-linked calendar actions.
-2. Local secure API key storage using secure storage.
-3. Persistent login/email state with shared preferences.
+---
 
-## AI & Agent Improvements
-
-1. Router model selects between SEARCH and CALENDAR handling.
-2. Calendar agent uses proactive tool calls (including auto-list before destructive actions).
-3. Better response finalization to confirm actions after tool execution.
-4. Improved multi-turn context handling with recent chat history.
-
-## UX Enhancements
-
-1. New landing screen with one-tap Google login.
-2. Chat-first interface for conversational scheduling.
-3. Cleaner visual design and smooth loading states.
-4. In-app error surfacing for auth and model failures.
-
-## Developer/Project Updates
-
-1. Flutter/Android generated build artifacts are excluded from version control.
-2. Repository structure cleaned for source-first commits and release workflow.
-
-## Known Limitations
-
-1. Search grounding is currently intrinsic-model based (no explicit live web retrieval tool in Dart SDK path).
-2. Requires valid Gemini API key and Google account authorization.
-3. Timezone handling is currently set to Asia/Kolkata in calendar event writes.
+**Version:** 1.0.0  
+**Release Date:** April 12, 2026
+... (Old content below)

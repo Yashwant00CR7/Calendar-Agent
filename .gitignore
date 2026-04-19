@@ -29,6 +29,7 @@ calendar_agent_app/ios/Flutter/ephemeral/
 calendar_agent_app/linux/flutter/ephemeral/
 calendar_agent_app/macos/Flutter/ephemeral/
 calendar_agent_app/windows/flutter/ephemeral/
+.claude 
 
 # JVM crash/replay logs from Android/Gradle runs
 calendar_agent_app/android/hs_err_pid*.log
