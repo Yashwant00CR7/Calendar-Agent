@@ -299,40 +299,58 @@ class AgentService {
 
   Future<String> _performWebSearch(String query) async {
     try {
-      // Using DuckDuckGo Instant Answer API for reliability
-      // Fallback to a simple HTML-lite request if needed
-      final url = Uri.parse('https://api.duckduckgo.com/?q=${Uri.encodeComponent(query)}&format=json&no_html=1&skip_disambig=1');
-      final response = await http.get(url, headers: {'User-Agent': 'CalendarAI/1.0'});
+      // Using DuckDuckGo HTML search for better snippets
+      final url = Uri.parse('https://html.duckduckgo.com/html/?q=${Uri.encodeComponent(query)}');
+      final response = await http.get(url, headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      });
 
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
         String results = "";
         
-        final abstract = data['AbstractText'] as String;
-        if (abstract.isNotEmpty) {
-          results += "TOP RESULT: $abstract\n\n";
-        }
-
-        final related = data['RelatedTopics'] as List;
-        if (related.isNotEmpty) {
-          results += "RELATED SNIPPETS:\n";
-          for (var item in related.take(5)) {
-            if (item is Map && item.containsKey('Text')) {
-              results += "- ${item['Text']}\n";
-            }
+        // Simple regex HTML parsing to extract snippet text without extra dependencies
+        final snippetRegExp = RegExp(r'<a class="result__snippet"[^>]*>(.*?)<\/a>', dotAll: true);
+        final titleRegExp = RegExp(r'<h2 class="result__title">[\s\S]*?<a[^>]*>(.*?)<\/a>', dotAll: true);
+        
+        final snippets = snippetRegExp.allMatches(response.body).toList();
+        final titles = titleRegExp.allMatches(response.body).toList();
+        
+        int count = 0;
+        for (int i = 0; i < snippets.length && count < 6; i++) {
+          String title = "Result ${i + 1}";
+          if (i < titles.length) {
+            title = _stripHtml(titles[i].group(1) ?? title);
+          }
+          String snippet = _stripHtml(snippets[i].group(1) ?? "");
+          
+          if (snippet.isNotEmpty) {
+            results += "SOURCE: $title\nSNIPPET: $snippet\n\n";
+            count++;
           }
         }
 
         if (results.isEmpty) {
           return "No direct snippets found for '$query'. Try a broader search term.";
         }
-        return results;
+        return "WEB SEARCH RESULTS FOR '$query':\n\n$results";
       } else {
         return "Search failed with status: ${response.statusCode}";
       }
     } catch (e) {
       return "Search error: $e";
     }
+  }
+
+  String _stripHtml(String htmlString) {
+    final RegExp exp = RegExp(r'<[^>]*>', multiLine: true, caseSensitive: true);
+    String result = htmlString.replaceAll(exp, '');
+    result = result.replaceAll('&#x27;', "'")
+                   .replaceAll('&quot;', '"')
+                   .replaceAll('&amp;', '&')
+                   .replaceAll('&lt;', '<')
+                   .replaceAll('&gt;', '>')
+                   .replaceAll('&nbsp;', ' ');
+    return result.trim().replaceAll(RegExp(r'\s+'), ' ');
   }
 
   Future<String> _handleOpenAICompatible(
