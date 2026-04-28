@@ -28,22 +28,54 @@ class CalendarService {
     bool overwrite = false,
   }) async {
     try {
-      final start = DateTime.parse(startStr);
-      final end = DateTime.parse(endStr);
+      final start = DateTime.parse(startStr).toUtc();
+      final end = DateTime.parse(endStr).toUtc();
+
+      // Check for conflicts
+      final conflictingEvents = await _calendarApi.events.list(
+        'primary',
+        timeMin: start,
+        timeMax: end,
+        singleEvents: true,
+      );
+
+      final conflicts = conflictingEvents.items?.where((e) {
+        final eStart = e.start?.dateTime ?? e.start?.date;
+        final eEnd = e.end?.dateTime ?? e.end?.date;
+        if (eStart == null || eEnd == null) return false;
+        // Strict overlap check to avoid flagging adjacent events
+        return start.isBefore(eEnd) && end.isAfter(eStart);
+      }).toList() ?? [];
+
+      if (conflicts.isNotEmpty) {
+        if (!overwrite) {
+          final conflictDetails = conflicts.map((e) => "${e.summary} (${e.start?.dateTime ?? e.start?.date})").join(', ');
+          return "🚨 CONFLICT DETECTED 🚨: The time slot overlaps with existing event(s): $conflictDetails. "
+                 "To proceed, you must use the `overwrite: true` parameter, but please ask the user for confirmation first.";
+        } else {
+          // Delete conflicting events
+          for (var conflict in conflicts) {
+            if (conflict.id != null) {
+              await _calendarApi.events.delete('primary', conflict.id!);
+            }
+          }
+        }
+      }
 
       final event = Event()
         ..summary = summary
         ..location = location
         ..description = description
-        ..start = (EventDateTime()..dateTime = start.toUtc())
-        ..end = (EventDateTime()..dateTime = end.toUtc());
+        ..start = (EventDateTime()..dateTime = start)
+        ..end = (EventDateTime()..dateTime = end);
 
       if (attendeeEmails != null && attendeeEmails.isNotEmpty) {
         event.attendees = attendeeEmails.map((e) => EventAttendee()..email = e).toList();
       }
 
       final createdEvent = await _calendarApi.events.insert(event, 'primary');
-      return "Successfully scheduled: ${createdEvent.summary} (${createdEvent.htmlLink})";
+      final overwriteMsg = overwrite && conflicts.isNotEmpty ? " (Overwrote ${conflicts.length} conflicting events)" : "";
+      return "Successfully scheduled: ${createdEvent.summary} (${createdEvent.htmlLink})$overwriteMsg";
     } catch (e) {
       return "Failed to create event: $e";
     }
