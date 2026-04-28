@@ -39,6 +39,7 @@ dependencies:
   shared_preferences: ^2.2.2
   google_sign_in: ^6.2.0
   googleapis: ^15.0.0
+  extension_google_sign_in_as_googleapis_auth: ^2.0.1
   google_generative_ai: any
   flutter_markdown: ^0.7.3+1
   googleapis_auth: ^2.0.0

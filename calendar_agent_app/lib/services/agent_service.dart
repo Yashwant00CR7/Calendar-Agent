@@ -35,19 +35,23 @@ class AgentService {
   final LLMProvider provider;
   final String apiKey;
   final String? geminiApiKey;
-  final GoogleSignInAccount? account;
+  final GoogleSignIn? googleSignIn;
   final String userEmail;
   final String modelId;
   final String sessionId;
+  final String? tavilyApiKey;
+  final String? context7ApiKey;
 
   AgentService({
     this.provider = LLMProvider.gemini,
     required this.apiKey,
     this.geminiApiKey,
+    this.tavilyApiKey,
+    this.context7ApiKey,
     required String userEmail,
     required this.modelId,
     required this.sessionId,
-    this.account,
+    this.googleSignIn,
   }) : userEmail = userEmail.trim().toLowerCase();
 
   Future<String> chat(
@@ -119,7 +123,7 @@ class AgentService {
     
     if (turnCount % 5 == 0) {
       debugPrint("Triggering Passive Context Snapshot (Turn $turnCount)...");
-      takeContextSnapshot(); // Non-blocking
+      takeContextSnapshot().then((res) => debugPrint(res)); // Non-blocking with logging
     }
 
     // Keep a reasonable context window
@@ -293,51 +297,346 @@ class AgentService {
             "required": ["query"]
           }
         }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "context7_tool",
+          "description": "Queries technical documentation and code examples for libraries/frameworks.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string", "description": "The technical question or documentation topic."},
+              "library_id": {"type": "string", "description": "Optional library ID like /vercel/next.js"}
+            },
+            "required": ["query"]
+          }
+        }
       }
     ];
   }
 
+  // ─── Web Search (multi-strategy with graceful fallback) ───────────────────
+  //
+  //  Strategy 1: POST to html.duckduckgo.com/html/ with browser-realistic headers.
+  //              DDG's HTML endpoint works best as a form POST, not a GET.
+  //              Returns HTML with class="result__snippet" / class="result__title".
+  //
+  //  Strategy 2: Brave Search free JSON API — no key required for basic queries.
+  //              Endpoint: https://api.search.brave.com/res/v1/web/search
+  //              Returns structured JSON that is trivial to parse.
+  //
+  //  Strategy 3: Fallback message so the LLM knows to reason from prior context.
+  // ─────────────────────────────────────────────────────────────────────────────
   Future<String> _performWebSearch(String query) async {
-    try {
-      // Using DuckDuckGo HTML search for better snippets
-      final url = Uri.parse('https://html.duckduckgo.com/html/?q=${Uri.encodeComponent(query)}');
-      final response = await http.get(url, headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      });
-
-      if (response.statusCode == 200) {
-        String results = "";
-        
-        // Simple regex HTML parsing to extract snippet text without extra dependencies
-        final snippetRegExp = RegExp(r'<a class="result__snippet"[^>]*>(.*?)<\/a>', dotAll: true);
-        final titleRegExp = RegExp(r'<h2 class="result__title">[\s\S]*?<a[^>]*>(.*?)<\/a>', dotAll: true);
-        
-        final snippets = snippetRegExp.allMatches(response.body).toList();
-        final titles = titleRegExp.allMatches(response.body).toList();
-        
-        int count = 0;
-        for (int i = 0; i < snippets.length && count < 6; i++) {
-          String title = "Result ${i + 1}";
-          if (i < titles.length) {
-            title = _stripHtml(titles[i].group(1) ?? title);
-          }
-          String snippet = _stripHtml(snippets[i].group(1) ?? "");
-          
-          if (snippet.isNotEmpty) {
-            results += "SOURCE: $title\nSNIPPET: $snippet\n\n";
-            count++;
-          }
-        }
-
-        if (results.isEmpty) {
-          return "No direct snippets found for '$query'. Try a broader search term.";
-        }
-        return "WEB SEARCH RESULTS FOR '$query':\n\n$results";
-      } else {
-        return "Search failed with status: ${response.statusCode}";
+    // ── Strategy 1: Gemini Google Search Grounding (FREE with Gemini 2.5) ────
+    // The Dart SDK v0.4.7 doesn't expose google_search grounding, so we hit
+    // the REST API directly. This uses the user's existing Gemini API key —
+    // no extra keys needed. Zero cost for Gemini 2.5 models.
+    final searchApiKey = geminiApiKey ?? (provider == LLMProvider.gemini ? apiKey : null);
+    if (searchApiKey != null && searchApiKey.isNotEmpty) {
+      try {
+        final geminiResult = await _searchViaGeminiGrounding(query, searchApiKey);
+        if (geminiResult != null) return geminiResult;
+      } catch (e) {
+        debugPrint('[WebSearch] Gemini grounding strategy failed: $e');
       }
+    }
+
+    // ── Strategy 2: Tavily AI Search (if key is configured) ──────────────────
+    if (tavilyApiKey != null && tavilyApiKey!.isNotEmpty) {
+      try {
+        final tavilyResult = await _searchViaTavily(query);
+        if (tavilyResult != null) return tavilyResult;
+      } catch (e) {
+        debugPrint('[WebSearch] Tavily strategy failed: $e');
+      }
+    }
+
+    // ── Strategy 3: DuckDuckGo Lite (scraping fallback) ──────────────────────
+    try {
+      final ddgLiteResult = await _searchViaDuckDuckGoLite(query);
+      if (ddgLiteResult != null) return ddgLiteResult;
     } catch (e) {
-      return "Search error: $e";
+      debugPrint('[WebSearch] DDG Lite strategy failed: $e');
+    }
+
+    // ── Strategy 4: Brave Search JSON API (last resort) ──────────────────────
+    try {
+      final braveResult = await _searchViaBrave(query);
+      if (braveResult != null) return braveResult;
+    } catch (e) {
+      debugPrint('[WebSearch] Brave strategy failed: $e');
+    }
+
+    // ── Strategy 5: Graceful degradation ─────────────────────────────────────
+    return "WEB SEARCH UNAVAILABLE: Could not retrieve live results for '$query'. "
+        "Please answer using your training knowledge and note that information may not be current.";
+  }
+
+
+
+  /// DuckDuckGo Lite version scraping. Extremely stable because it's
+  /// designed for low-bandwidth / terminal browsers.
+  Future<String?> _searchViaDuckDuckGoLite(String query) async {
+    final url = Uri.parse('https://duckduckgo.com/lite/');
+    final response = await http.post(
+      url,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'text/html, */*',
+      },
+      body: 'q=${Uri.encodeComponent(query)}',
+    ).timeout(const Duration(seconds: 15));
+
+    if (response.statusCode != 200) return null;
+
+    final body = response.body;
+    final buffer = StringBuffer();
+    buffer.writeln("WEB SEARCH RESULTS FOR '$query' (via DDG Lite):\n");
+
+    // Lite results are usually in <table> rows with specific classes
+    final titleRegExp = RegExp(r'class="result-link"[^>]*>([\s\S]*?)</a>', dotAll: true);
+    final snippetRegExp = RegExp(r'class="result-snippet"[^>]*>([\s\S]*?)</td>', dotAll: true);
+
+    final titles = titleRegExp.allMatches(body).toList();
+    final snippets = snippetRegExp.allMatches(body).toList();
+
+    int count = 0;
+    for (int i = 0; i < titles.length && count < 5; i++) {
+      final title = _stripHtml(titles[i].group(1) ?? 'Result');
+      final snippet = i < snippets.length ? _stripHtml(snippets[i].group(1) ?? '') : '';
+      
+      if (snippet.isEmpty) continue;
+
+      buffer.writeln('RESULT ${count + 1}:');
+      buffer.writeln('  Title: $title');
+      buffer.writeln('  Snippet: $snippet');
+      buffer.writeln();
+      count++;
+    }
+
+    return count > 0 ? buffer.toString() : null;
+  }
+
+  /// Brave Search free JSON API. No API key is required for the anonymous
+  /// goggles endpoint used here. Returns up to 5 organic results.
+  Future<String?> _searchViaBrave(String query) async {
+    // Brave's free web search endpoint (anonymous, no key needed)
+    final url = Uri.parse(
+      'https://search.brave.com/api/web?q=${Uri.encodeComponent(query)}&count=5&safesearch=moderate',
+    );
+
+    final response = await http.get(
+      url,
+      headers: {
+        'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+            '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://search.brave.com/',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+    ).timeout(const Duration(seconds: 12));
+
+    debugPrint('[WebSearch] Brave status: ${response.statusCode}');
+
+    if (response.statusCode != 200) return null;
+
+    final Map<String, dynamic> data = jsonDecode(response.body);
+
+    // Brave's JSON schema: { web: { results: [ { title, description, url } ] } }
+    final webBlock = data['web'];
+    if (webBlock == null) return null;
+
+    final List<dynamic> results = webBlock['results'] ?? [];
+    if (results.isEmpty) return null;
+
+    final buffer = StringBuffer();
+    buffer.writeln("WEB SEARCH RESULTS FOR '$query' (via Brave):\n");
+
+    int count = 0;
+    for (final r in results) {
+      if (count >= 5) break;
+      final title = r['title']?.toString() ?? 'Result ${count + 1}';
+      final snippet = r['description']?.toString() ?? '';
+      final link = r['url']?.toString() ?? '';
+
+      if (snippet.isEmpty) continue;
+
+      buffer.writeln('RESULT ${count + 1}:');
+      buffer.writeln('  Title: $title');
+      buffer.writeln('  Snippet: $snippet');
+      if (link.isNotEmpty) buffer.writeln('  URL: $link');
+      buffer.writeln();
+      count++;
+    }
+
+    return count > 0 ? buffer.toString() : null;
+  }
+
+  Future<String?> _searchViaTavily(String query) async {
+    final url = Uri.parse('https://api.tavily.com/search');
+    final response = await http.post(
+      url,
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'api_key': tavilyApiKey,
+        'query': query,
+        'search_depth': 'basic',
+        'max_results': 5,
+      }),
+    ).timeout(const Duration(seconds: 10));
+
+    if (response.statusCode != 200) return null;
+
+    final data = jsonDecode(response.body);
+    final List<dynamic> results = data['results'] ?? [];
+    if (results.isEmpty) return null;
+
+    final buffer = StringBuffer();
+    buffer.writeln("WEB SEARCH RESULTS FOR '$query' (via Tavily AI):\n");
+    for (int i = 0; i < results.length; i++) {
+      final r = results[i];
+      buffer.writeln('RESULT ${i + 1}:');
+      buffer.writeln('  Title: ${r['title']}');
+      buffer.writeln('  Snippet: ${r['content']}');
+      buffer.writeln('  URL: ${r['url']}');
+      buffer.writeln();
+    }
+    return buffer.toString();
+  }
+
+  /// Gemini Google Search Grounding via REST API.
+  ///
+  /// The `google_generative_ai` Dart SDK v0.4.7 doesn't expose the
+  /// `google_search` built-in tool, so we call the REST API directly.
+  /// This is FREE for Gemini 2.5 models and uses the user's existing API key.
+  ///
+  /// Ref: https://ai.google.dev/gemini-api/docs/google-search
+  Future<String?> _searchViaGeminiGrounding(String query, String apiKeyForSearch) async {
+    // Use gemini-1.5-flash for grounding — fast, free, and supports google_search
+    final url = Uri.parse(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKeyForSearch',
+    );
+
+    final response = await http.post(
+      url,
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'contents': [
+          {
+            'parts': [
+              {'text': 'Search the web and provide factual, up-to-date information about: $query'}
+            ]
+          }
+        ],
+        'tools': [
+          {'google_search': {}}
+        ],
+      }),
+    ).timeout(const Duration(seconds: 15));
+
+    debugPrint('[WebSearch] Gemini grounding status: ${response.statusCode}');
+
+    if (response.statusCode != 200) return null;
+
+    final data = jsonDecode(response.body);
+    final candidates = data['candidates'] as List<dynamic>?;
+    if (candidates == null || candidates.isEmpty) return null;
+
+    final candidate = candidates[0];
+    final content = candidate['content'];
+    if (content == null) return null;
+
+    // Extract the text response
+    final parts = content['parts'] as List<dynamic>?;
+    if (parts == null || parts.isEmpty) return null;
+
+    final text = parts[0]['text']?.toString();
+    if (text == null || text.isEmpty) return null;
+
+    // Extract grounding metadata for citations
+    final groundingMetadata = candidate['groundingMetadata'];
+    final buffer = StringBuffer();
+    buffer.writeln("WEB SEARCH RESULTS FOR '$query' (via Google Search):\n");
+    buffer.writeln(text);
+
+    if (groundingMetadata != null) {
+      final chunks = groundingMetadata['groundingChunks'] as List<dynamic>?;
+      if (chunks != null && chunks.isNotEmpty) {
+        buffer.writeln('\nSOURCES:');
+        for (int i = 0; i < chunks.length && i < 5; i++) {
+          final web = chunks[i]['web'];
+          if (web != null) {
+            buffer.writeln('  ${i + 1}. ${web['title'] ?? 'Source'} - ${web['uri'] ?? ''}');
+          }
+        }
+      }
+    }
+
+    return buffer.toString();
+  }
+
+  Future<String> _executeContext7(String query, String? libraryId) async {
+    if (context7ApiKey == null || context7ApiKey!.isEmpty) {
+      return "ERROR: Context7 API key missing. Please provide it in System Config to use documentation tools.";
+    }
+
+    try {
+      // Step 1: Resolve Library ID if not provided
+      String resolvedLibId = libraryId ?? "";
+      if (resolvedLibId.isEmpty) {
+        final resolveUrl = Uri.parse('https://api.context7.com/v1/resolve-library-id');
+        final resolveResponse = await http.post(
+          resolveUrl,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $context7ApiKey',
+          },
+          body: jsonEncode({
+            'query': query,
+            'libraryName': query.split(' ').first, // Guessing the first word
+          }),
+        ).timeout(const Duration(seconds: 10));
+
+        if (resolveResponse.statusCode == 200) {
+          final resolveData = jsonDecode(resolveResponse.body);
+          if (resolveData['libraries'] != null && resolveData['libraries'].isNotEmpty) {
+            resolvedLibId = resolveData['libraries'][0]['libraryId'];
+          }
+        }
+      }
+
+      if (resolvedLibId.isEmpty) {
+        return "Could not resolve library ID for '$query'. Please try specifying a library name.";
+      }
+
+      // Step 2: Query Docs
+      final queryUrl = Uri.parse('https://api.context7.com/v1/query-docs');
+      final queryResponse = await http.post(
+        queryUrl,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $context7ApiKey',
+        },
+        body: jsonEncode({
+          'libraryId': resolvedLibId,
+          'query': query,
+          'researchMode': false,
+        }),
+      ).timeout(const Duration(seconds: 20));
+
+      if (queryResponse.statusCode != 200) {
+        return "Context7 API error (${queryResponse.statusCode}): ${queryResponse.body}";
+      }
+
+      final queryData = jsonDecode(queryResponse.body);
+      return queryData['answer'] ?? "No documentation found for '$query'.";
+    } catch (e) {
+      return "Context7 execution failed: $e";
     }
   }
 
@@ -361,7 +660,7 @@ class AgentService {
         ? "https://api.groq.com/openai/v1" 
         : "https://openrouter.ai/api/v1";
 
-    final calendarService = await CalendarService.create(account);
+    final calendarService = await CalendarService.create(googleSignIn);
     if (calendarService == null) {
       return "Error: Google Calendar not linked. Please sign in again.";
     }
@@ -441,7 +740,7 @@ class AgentService {
     Uint8List? currentFileBytes,
     String? currentMimeType,
   }) async {
-    final calendarService = await CalendarService.create(account);
+    final calendarService = await CalendarService.create(googleSignIn);
     if (calendarService == null) {
       return "Error: Google Calendar not linked. Please sign in again.";
     }
@@ -561,6 +860,8 @@ class AgentService {
         return await MemoryService.queryMemory(userEmail, args['query'].toString(), geminiApiKey!);
       case 'web_search_tool':
         return await _performWebSearch(args['query'].toString());
+      case 'context7_tool':
+        return await _executeContext7(args['query'].toString(), args['library_id']?.toString());
       default:
         return "Error: Unknown tool $name";
     }
@@ -571,6 +872,8 @@ class AgentService {
 ### DIRECTIVES
 - **Context Awareness**: Today is ${DateTime.now().toString()}. Use device-local timezone.
 - **Proactive Retrieval**: ALWAYS query `query_personal_memory_tool` first for any user preferences, history, or past interactions to ensure a personalized experience—not just for file context. 
+- **Web Search First for Unknown Facts**: If the user asks about real-time information, current events, schedules, news, scores, weather, sports fixtures, upcoming dates, or anything beyond your training data — you MUST call `web_search_tool` BEFORE answering. NEVER refuse a factual query by saying "I don't have access to that information" or "this is too far in the future." You have a web search tool — USE IT. If the search returns results, synthesize them. If it fails, tell the user the search failed and suggest they try again.
+- **Technical Documentation**: For coding/library questions, prefer `context7_tool` to fetch live documentation.
 - **Proactive Scheduling**: Parse documents (Images/PDFs) to identify "Single Events" vs "Timetables".
 - **Conflict Vigilance**: Always call `list_upcoming_events_tool` before scheduling any new events.
 - **Ambiguity Gate**: Ask clarifying questions before bulk-scheduling if data is unclear.
@@ -579,6 +882,7 @@ class AgentService {
 
 ### CONSTRAINTS
 - **Access Authority**: Never claim you lack access to the calendar. Use tools.
+- **No Refusals for Searchable Facts**: Never say "I cannot find" or "not yet available" for ANY factual query. Always attempt `web_search_tool` first.
 - **Privacy**: Never share or index data across user boundaries.
 - **Autonomous Memory**: Automatically identify and save durable user preferences, recurring habits, and life-facts using the save_to_personal_memory_tool as they emerge in conversation. Do not wait for explicit permission to remember important details.
 - **Minimal Preamble**: Do not explain your tools; just execute and provide a clear summary.
@@ -674,6 +978,18 @@ class AgentService {
           requiredProperties: ['query'],
         ),
       ),
+      FunctionDeclaration(
+        'context7_tool',
+        'Queries technical documentation and code examples for libraries/frameworks.',
+        Schema(
+          SchemaType.object,
+          properties: {
+            'query': Schema(SchemaType.string, description: 'The technical question or documentation topic.'),
+            'library_id': Schema(SchemaType.string, description: 'Optional library ID like /vercel/next.js', nullable: true),
+          },
+          requiredProperties: ['query'],
+        ),
+      ),
     ];
   }
 
@@ -682,7 +998,7 @@ class AgentService {
     try {
       // Use the designated Gemini key and a reliable model for refinement
       final model = GenerativeModel(
-        model: 'gemini-2.5-flash',
+        model: 'gemini-1.5-flash', // Use a valid, high-speed model for refinement
         apiKey: geminiApiKey!,
       );
       
@@ -714,7 +1030,7 @@ CLEAN FACT:''';
   Future<String> _generateBackgroundLLMResponse(String prompt) async {
     try {
       if (geminiApiKey == null || geminiApiKey!.trim().isEmpty) return "";
-      final model = GenerativeModel(model: 'gemini-2.5-flash', apiKey: geminiApiKey!);
+      final model = GenerativeModel(model: 'gemini-1.5-flash', apiKey: geminiApiKey!);
       final response = await model.generateContent([Content.text(prompt)]);
       return response.text ?? "";
     } catch (e) {
@@ -780,3 +1096,5 @@ ${historyList.asMap().entries.map((e) => "TURN ${e.key + 1}:\nUser: ${e.value['u
     return "SNAPSHOT COMPLETE: $indexedCount significant facts indexed.";
   }
 }
+
+

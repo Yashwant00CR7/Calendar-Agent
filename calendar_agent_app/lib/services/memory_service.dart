@@ -9,7 +9,7 @@ class MemoryService {
   static const String dbName = 'memory.db';
   static const String tableName = 'memory_nodes';
   static Database? _db;
-  static String activeModel = 'text-embedding-005'; // Diagnostic tracker
+  static String activeModel = 'text-embedding-004'; // Diagnostic tracker
 
   static Future<Database> get database async {
     if (_db != null) return _db!;
@@ -31,7 +31,7 @@ class MemoryService {
             embedding_json TEXT NOT NULL,
             metadata_json TEXT NOT NULL DEFAULT '{}',
             source_type TEXT NOT NULL DEFAULT 'Personal',
-            model_version TEXT NOT NULL DEFAULT 'text-embedding-005',
+            model_version TEXT NOT NULL DEFAULT 'text-embedding-004',
             created_at TEXT NOT NULL
           )
         ''');
@@ -80,6 +80,7 @@ class MemoryService {
     }
 
     final models = [
+      'text-embedding-004',
       'text-embedding-005',
       'gemini-embedding-001',
       'embedding-001'
@@ -134,7 +135,9 @@ class MemoryService {
 
   static Future<String> _refineContent(String text, String apiKey) async {
     try {
-      final url = Uri.parse(_getEndpoint('generate', 'gemini-2.5-flash', apiKey));
+      // Uses gemini-2.5-flash-lite for background fact extraction (lowest cost/latency)
+      // Verified 2026-04-28: https://ai.google.dev/gemini-api/docs/pricing
+      final url = Uri.parse(_getEndpoint('generate', 'gemini-2.5-flash-lite', apiKey));
       final body = jsonEncode({
         "contents": [{
           "parts": [{
@@ -293,7 +296,7 @@ class MemoryService {
     return await db.delete(
       tableName,
       where: 'user_id = ? AND model_version != ?',
-      whereArgs: [normalizedUserId, 'text-embedding-005'],
+      whereArgs: [normalizedUserId, 'text-embedding-004'],
     );
   }
 }
