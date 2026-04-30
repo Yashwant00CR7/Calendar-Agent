@@ -30,7 +30,7 @@ class _CalendarAgentAppState extends State<CalendarAgentApp> {
   late final GoogleSignIn _googleSignIn = GoogleSignIn(
     serverClientId:
         '4606294657-sqdj9sqoubld8acvq4e6h9qvftjo3b9o.apps.googleusercontent.com',
-    scopes: ['https://www.googleapis.com/auth/calendar.events', 'email'],
+    scopes: ['https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/tasks', 'email'],
   );
 
   bool _isLoggedIn = false;
@@ -1485,25 +1485,39 @@ class HUDBlock extends StatelessWidget {
   Widget build(BuildContext context) {
     final isUser = message.isUser;
     final accentColor = isDark ? Colors.cyanAccent : Colors.blueAccent;
+    final isConflict = message.text.contains('🚨 **CONFLICT DETECTED** 🚨');
+    
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 8),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         decoration: BoxDecoration(
-          border: Border(
-            left:
-                !isUser
-                    ? BorderSide(color: accentColor, width: 2)
-                    : BorderSide.none,
-            right:
-                isUser
-                    ? BorderSide(
-                      color: isDark ? Colors.white10 : Colors.black12,
-                      width: 2,
-                    )
-                    : BorderSide.none,
-          ),
+          color: isConflict 
+              ? Colors.redAccent.withValues(alpha: 0.05) 
+              : Colors.transparent,
+          borderRadius: isConflict ? BorderRadius.circular(12) : null,
+          border: isConflict
+              ? Border.all(color: Colors.redAccent, width: 2)
+              : Border(
+                  left: !isUser
+                      ? BorderSide(color: accentColor, width: 2)
+                      : BorderSide.none,
+                  right: isUser
+                      ? BorderSide(
+                          color: isDark ? Colors.white10 : Colors.black12,
+                          width: 2,
+                        )
+                      : BorderSide.none,
+                ),
+          boxShadow: [
+            if (isConflict)
+              BoxShadow(
+                color: Colors.redAccent.withValues(alpha: 0.2),
+                blurRadius: 10,
+                spreadRadius: 1,
+              ),
+          ],
         ),
         constraints: BoxConstraints(
           maxWidth: MediaQuery.of(context).size.width * 0.8,

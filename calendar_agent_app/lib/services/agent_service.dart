@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:path_provider/path_provider.dart';
 import 'calendar_service.dart';
+import 'task_service.dart';
 import 'memory_service.dart';
 
 enum LLMProvider { gemini, groq, openrouter }
@@ -21,16 +22,23 @@ abstract class AgentApiException implements Exception {
 }
 
 class RateLimitException extends AgentApiException {
-  RateLimitException([super.msg = 'Rate limit exceeded (429). Please wait a moment.', super.code = 429]);
+  RateLimitException([
+    super.msg = 'Rate limit exceeded (429). Please wait a moment.',
+    super.code = 429,
+  ]);
 }
 
 class InvalidCredentialsException extends AgentApiException {
-  InvalidCredentialsException([super.msg = 'Invalid API key or unauthorized (401/403).', super.code = 401]);
+  InvalidCredentialsException([
+    super.msg = 'Invalid API key or unauthorized (401/403).',
+    super.code = 401,
+  ]);
 }
 
 class AgentBadRequestException extends AgentApiException {
   AgentBadRequestException(super.msg, [super.code = 400]);
 }
+
 class AgentService {
   final LLMProvider provider;
   final String apiKey;
@@ -61,7 +69,8 @@ class AgentService {
   ]) async {
     // Session-based history handling
     final prefs = await SharedPreferences.getInstance();
-    final String rawHistory = prefs.getString('chat_history_$sessionId') ?? '[]';
+    final String rawHistory =
+        prefs.getString('chat_history_$sessionId') ?? '[]';
     List<dynamic> historyList = jsonDecode(rawHistory);
 
     // Update session metadata if this is the first message
@@ -103,7 +112,8 @@ class AgentService {
       debugPrint("Agent Service Error: $e");
       final errorMsg = e.toString();
       if (errorMsg.contains('429')) throw RateLimitException();
-      if (errorMsg.contains('401') || errorMsg.contains('403')) throw InvalidCredentialsException();
+      if (errorMsg.contains('401') || errorMsg.contains('403'))
+        throw InvalidCredentialsException();
       throw AgentBadRequestException("Service error: $e");
     }
 
@@ -114,23 +124,25 @@ class AgentService {
       if (tempFilePath != null) "file_path": tempFilePath,
       if (mimeType != null) "mime_type": mimeType,
     });
-    
+
     // 4. PASIVE MEMORY SYNC: Every 5 turns
     final turnCountKey = 'turn_count_$sessionId';
     int turnCount = prefs.getInt(turnCountKey) ?? 0;
     turnCount++;
     await prefs.setInt(turnCountKey, turnCount);
-    
+
     if (turnCount % 5 == 0) {
       debugPrint("Triggering Passive Context Snapshot (Turn $turnCount)...");
-      takeContextSnapshot().then((res) => debugPrint(res)); // Non-blocking with logging
+      takeContextSnapshot().then(
+        (res) => debugPrint(res),
+      ); // Non-blocking with logging
     }
 
     // Keep a reasonable context window
     if (historyList.length > 8) {
       historyList.removeAt(0);
     }
-    
+
     await prefs.setString('chat_history_$sessionId', jsonEncode(historyList));
 
     return finalAnswer;
@@ -160,16 +172,19 @@ class AgentService {
     await prefs.setString(sessionsKey, jsonEncode(sessions));
   }
 
-  static Future<List<Map<String, dynamic>>> getSessions(String userEmail) async {
+  static Future<List<Map<String, dynamic>>> getSessions(
+    String userEmail,
+  ) async {
     final prefs = await SharedPreferences.getInstance();
-    final String rawSessions = prefs.getString('chat_sessions_$userEmail') ?? '[]';
+    final String rawSessions =
+        prefs.getString('chat_sessions_$userEmail') ?? '[]';
     List<dynamic> sessions = jsonDecode(rawSessions);
     return sessions.map((s) => Map<String, dynamic>.from(s)).toList();
   }
 
   static Future<void> deleteSession(String userEmail, String sessionId) async {
     final prefs = await SharedPreferences.getInstance();
-    
+
     // Remove from metadata list
     final String sessionsKey = 'chat_sessions_$userEmail';
     final String rawSessions = prefs.getString(sessionsKey) ?? '[]';
@@ -180,7 +195,6 @@ class AgentService {
     // Remove history messages
     await prefs.remove('chat_history_$sessionId');
   }
-
 
   List<Map<String, dynamic>> _mapToolsToOpenAI() {
     return [
@@ -193,63 +207,81 @@ class AgentService {
             "type": "object",
             "properties": {
               "summary": {"type": "string", "description": "Event title"},
-              "start": {"type": "string", "description": "Start time in ISO format"},
-              "end": {"type": "string", "description": "End time in ISO format"},
+              "start": {
+                "type": "string",
+                "description": "Start time in ISO format",
+              },
+              "end": {
+                "type": "string",
+                "description": "End time in ISO format",
+              },
               "location": {"type": "string", "description": "Event location"},
-              "description": {"type": "string", "description": "Event description"},
+              "description": {
+                "type": "string",
+                "description": "Event description",
+              },
               "color_name": {
                 "type": "string",
-                "description": "Color name (lavender, sage, etc.)"
+                "description": "Color name (lavender, sage, etc.)",
               },
               "attendee_emails": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "List of attendee emails"
+                "description": "List of attendee emails",
               },
               "overwrite": {
                 "type": "boolean",
-                "description": "If true, conflicting events will be deleted and replaced."
-              }
+                "description":
+                    "If true, conflicting events will be deleted and replaced.",
+              },
             },
-            "required": ["summary", "start", "end"]
-          }
-        }
+            "required": ["summary", "start", "end"],
+          },
+        },
       },
       {
         "type": "function",
         "function": {
           "name": "list_upcoming_events_tool",
           "description": "Lists the user's upcoming 10 calendar events.",
-          "parameters": {"type": "object", "properties": {}}
-        }
+          "parameters": {"type": "object", "properties": {}},
+        },
       },
       {
         "type": "function",
         "function": {
           "name": "search_events_tool",
-          "description": "Searches the calendar for specific events by name/keyword.",
+          "description":
+              "Searches the calendar for specific events by name/keyword.",
           "parameters": {
             "type": "object",
             "properties": {
-              "query": {"type": "string", "description": "Search term or keyword"}
+              "query": {
+                "type": "string",
+                "description": "Search term or keyword",
+              },
             },
-            "required": ["query"]
-          }
-        }
+            "required": ["query"],
+          },
+        },
       },
       {
         "type": "function",
         "function": {
           "name": "delete_event_tool",
-          "description": "Deletes a specific event from the calendar using its ID.",
+          "description":
+              "Deletes a specific event from the calendar using its ID.",
           "parameters": {
             "type": "object",
             "properties": {
-              "event_id": {"type": "string", "description": "ID of the event to delete"}
+              "event_id": {
+                "type": "string",
+                "description": "ID of the event to delete",
+              },
             },
-            "required": ["event_id"]
-          }
-        }
+            "required": ["event_id"],
+          },
+        },
       },
       {
         "type": "function",
@@ -261,58 +293,129 @@ class AgentService {
             "properties": {
               "content": {"type": "string", "description": "The text to save."},
               "source_type": {
-                "type": "string", 
+                "type": "string",
                 "enum": ["Personal", "Document", "Calendar"],
-                "description": "Category of the information (Defaults to Personal)."
-              }
+                "description":
+                    "Category of the information (Defaults to Personal).",
+              },
             },
-            "required": ["content"]
-          }
-        }
+            "required": ["content"],
+          },
+        },
       },
       {
         "type": "function",
         "function": {
           "name": "query_personal_memory_tool",
-          "description": "Retrieves past context from the user's personal long-term memory.",
+          "description":
+              "Retrieves past context from the user's personal long-term memory.",
           "parameters": {
             "type": "object",
             "properties": {
-              "query": {"type": "string", "description": "The search term."}
+              "query": {"type": "string", "description": "The search term."},
             },
-            "required": ["query"]
-          }
-        }
+            "required": ["query"],
+          },
+        },
       },
       {
         "type": "function",
         "function": {
           "name": "web_search_tool",
-          "description": "Searches the internet for real-time information, news, or public facts.",
+          "description":
+              "Searches the internet for real-time information, news, or public facts.",
           "parameters": {
             "type": "object",
             "properties": {
-              "query": {"type": "string", "description": "The search term."}
+              "query": {"type": "string", "description": "The search term."},
             },
-            "required": ["query"]
-          }
-        }
+            "required": ["query"],
+          },
+        },
       },
       {
         "type": "function",
         "function": {
           "name": "context7_tool",
-          "description": "Queries technical documentation and code examples for libraries/frameworks.",
+          "description":
+              "Queries technical documentation and code examples for libraries/frameworks.",
           "parameters": {
             "type": "object",
             "properties": {
-              "query": {"type": "string", "description": "The technical question or documentation topic."},
-              "library_id": {"type": "string", "description": "Optional library ID like /vercel/next.js"}
+              "query": {
+                "type": "string",
+                "description": "The technical question or documentation topic.",
+              },
+              "library_id": {
+                "type": "string",
+                "description": "Optional library ID like /vercel/next.js",
+              },
             },
-            "required": ["query"]
-          }
-        }
-      }
+            "required": ["query"],
+          },
+        },
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "list_tasks_tool",
+          "description": "Lists the user's pending tasks.",
+          "parameters": {"type": "object", "properties": {}},
+        },
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "create_task_tool",
+          "description": "Creates a new task.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "title": {"type": "string", "description": "Task title"},
+              "notes": {"type": "string", "description": "Task notes"},
+              "due": {
+                "type": "string",
+                "description": "Due date in ISO format",
+              },
+            },
+            "required": ["title"],
+          },
+        },
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "complete_task_tool",
+          "description": "Marks a specific task as completed.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "task_id": {
+                "type": "string",
+                "description": "ID of the task to complete",
+              },
+            },
+            "required": ["task_id"],
+          },
+        },
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "delete_task_tool",
+          "description": "Deletes a specific task.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "task_id": {
+                "type": "string",
+                "description": "ID of the task to delete",
+              },
+            },
+            "required": ["task_id"],
+          },
+        },
+      },
     ];
   }
 
@@ -333,10 +436,14 @@ class AgentService {
     // The Dart SDK v0.4.7 doesn't expose google_search grounding, so we hit
     // the REST API directly. This uses the user's existing Gemini API key —
     // no extra keys needed. Zero cost for Gemini 2.5 models.
-    final searchApiKey = geminiApiKey ?? (provider == LLMProvider.gemini ? apiKey : null);
+    final searchApiKey =
+        geminiApiKey ?? (provider == LLMProvider.gemini ? apiKey : null);
     if (searchApiKey != null && searchApiKey.isNotEmpty) {
       try {
-        final geminiResult = await _searchViaGeminiGrounding(query, searchApiKey);
+        final geminiResult = await _searchViaGeminiGrounding(
+          query,
+          searchApiKey,
+        );
         if (geminiResult != null) return geminiResult;
       } catch (e) {
         debugPrint('[WebSearch] Gemini grounding strategy failed: $e');
@@ -374,21 +481,22 @@ class AgentService {
         "Please answer using your training knowledge and note that information may not be current.";
   }
 
-
-
   /// DuckDuckGo Lite version scraping. Extremely stable because it's
   /// designed for low-bandwidth / terminal browsers.
   Future<String?> _searchViaDuckDuckGoLite(String query) async {
     final url = Uri.parse('https://duckduckgo.com/lite/');
-    final response = await http.post(
-      url,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Accept': 'text/html, */*',
-      },
-      body: 'q=${Uri.encodeComponent(query)}',
-    ).timeout(const Duration(seconds: 15));
+    final response = await http
+        .post(
+          url,
+          headers: {
+            'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': 'text/html, */*',
+          },
+          body: 'q=${Uri.encodeComponent(query)}',
+        )
+        .timeout(const Duration(seconds: 15));
 
     if (response.statusCode != 200) return null;
 
@@ -397,8 +505,14 @@ class AgentService {
     buffer.writeln("WEB SEARCH RESULTS FOR '$query' (via DDG Lite):\n");
 
     // Lite results are usually in <table> rows with specific classes
-    final titleRegExp = RegExp(r'class="result-link"[^>]*>([\s\S]*?)</a>', dotAll: true);
-    final snippetRegExp = RegExp(r'class="result-snippet"[^>]*>([\s\S]*?)</td>', dotAll: true);
+    final titleRegExp = RegExp(
+      r'class="result-link"[^>]*>([\s\S]*?)</a>',
+      dotAll: true,
+    );
+    final snippetRegExp = RegExp(
+      r'class="result-snippet"[^>]*>([\s\S]*?)</td>',
+      dotAll: true,
+    );
 
     final titles = titleRegExp.allMatches(body).toList();
     final snippets = snippetRegExp.allMatches(body).toList();
@@ -406,8 +520,9 @@ class AgentService {
     int count = 0;
     for (int i = 0; i < titles.length && count < 5; i++) {
       final title = _stripHtml(titles[i].group(1) ?? 'Result');
-      final snippet = i < snippets.length ? _stripHtml(snippets[i].group(1) ?? '') : '';
-      
+      final snippet =
+          i < snippets.length ? _stripHtml(snippets[i].group(1) ?? '') : '';
+
       if (snippet.isEmpty) continue;
 
       buffer.writeln('RESULT ${count + 1}:');
@@ -428,18 +543,20 @@ class AgentService {
       'https://search.brave.com/api/web?q=${Uri.encodeComponent(query)}&count=5&safesearch=moderate',
     );
 
-    final response = await http.get(
-      url,
-      headers: {
-        'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-            '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://search.brave.com/',
-        'X-Requested-With': 'XMLHttpRequest',
-      },
-    ).timeout(const Duration(seconds: 12));
+    final response = await http
+        .get(
+          url,
+          headers: {
+            'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://search.brave.com/',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+        )
+        .timeout(const Duration(seconds: 12));
 
     debugPrint('[WebSearch] Brave status: ${response.statusCode}');
 
@@ -479,16 +596,18 @@ class AgentService {
 
   Future<String?> _searchViaTavily(String query) async {
     final url = Uri.parse('https://api.tavily.com/search');
-    final response = await http.post(
-      url,
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'api_key': tavilyApiKey,
-        'query': query,
-        'search_depth': 'basic',
-        'max_results': 5,
-      }),
-    ).timeout(const Duration(seconds: 10));
+    final response = await http
+        .post(
+          url,
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'api_key': tavilyApiKey,
+            'query': query,
+            'search_depth': 'basic',
+            'max_results': 5,
+          }),
+        )
+        .timeout(const Duration(seconds: 10));
 
     if (response.statusCode != 200) return null;
 
@@ -516,68 +635,87 @@ class AgentService {
   /// This is FREE for Gemini 2.5 models and uses the user's existing API key.
   ///
   /// Ref: https://ai.google.dev/gemini-api/docs/google-search
-  Future<String?> _searchViaGeminiGrounding(String query, String apiKeyForSearch) async {
-    // Use gemini-1.5-flash for grounding — fast, free, and supports google_search
+  Future<String?> _searchViaGeminiGrounding(
+    String query,
+    String apiKeyForSearch,
+  ) async {
+    // Use gemini-2.5-flash for grounding — specified in SPECIFICATION.md
     final url = Uri.parse(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKeyForSearch',
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$apiKeyForSearch',
     );
 
-    final response = await http.post(
-      url,
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'contents': [
-          {
-            'parts': [
-              {'text': 'Search the web and provide factual, up-to-date information about: $query'}
-            ]
-          }
-        ],
-        'tools': [
-          {'google_search': {}}
-        ],
-      }),
-    ).timeout(const Duration(seconds: 15));
+    try {
+      final response = await http
+          .post(
+            url,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'contents': [
+                {
+                  'parts': [
+                    {
+                      'text':
+                          'Search the web and provide factual, up-to-date information about: $query',
+                    },
+                  ],
+                },
+              ],
+              'tools': [
+                {
+                  'google_search': {},
+                },
+              ],
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
 
-    debugPrint('[WebSearch] Gemini grounding status: ${response.statusCode}');
+      if (response.statusCode != 200) {
+        debugPrint('[WebSearch] Gemini Grounding Error [${response.statusCode}]: ${response.body}');
+        return null;
+      }
 
-    if (response.statusCode != 200) return null;
+      final data = jsonDecode(response.body);
+      final candidates = data['candidates'] as List<dynamic>?;
+      if (candidates == null || candidates.isEmpty) {
+        debugPrint('[WebSearch] Gemini Grounding Error: No candidates found');
+        return null;
+      }
 
-    final data = jsonDecode(response.body);
-    final candidates = data['candidates'] as List<dynamic>?;
-    if (candidates == null || candidates.isEmpty) return null;
+      final candidate = candidates[0];
+      final content = candidate['content'];
+      if (content == null) return null;
 
-    final candidate = candidates[0];
-    final content = candidate['content'];
-    if (content == null) return null;
+      final parts = content['parts'] as List<dynamic>?;
+      if (parts == null || parts.isEmpty) return null;
 
-    // Extract the text response
-    final parts = content['parts'] as List<dynamic>?;
-    if (parts == null || parts.isEmpty) return null;
+      final text = parts[0]['text']?.toString();
+      if (text == null || text.isEmpty) return null;
 
-    final text = parts[0]['text']?.toString();
-    if (text == null || text.isEmpty) return null;
+      final groundingMetadata = candidate['groundingMetadata'];
+      final buffer = StringBuffer();
+      buffer.writeln("WEB SEARCH RESULTS FOR '$query' (via Google Search):\n");
+      buffer.writeln(text);
 
-    // Extract grounding metadata for citations
-    final groundingMetadata = candidate['groundingMetadata'];
-    final buffer = StringBuffer();
-    buffer.writeln("WEB SEARCH RESULTS FOR '$query' (via Google Search):\n");
-    buffer.writeln(text);
-
-    if (groundingMetadata != null) {
-      final chunks = groundingMetadata['groundingChunks'] as List<dynamic>?;
-      if (chunks != null && chunks.isNotEmpty) {
-        buffer.writeln('\nSOURCES:');
-        for (int i = 0; i < chunks.length && i < 5; i++) {
-          final web = chunks[i]['web'];
-          if (web != null) {
-            buffer.writeln('  ${i + 1}. ${web['title'] ?? 'Source'} - ${web['uri'] ?? ''}');
+      if (groundingMetadata != null) {
+        final chunks = groundingMetadata['groundingChunks'] as List<dynamic>?;
+        if (chunks != null && chunks.isNotEmpty) {
+          buffer.writeln('\nSOURCES:');
+          for (int i = 0; i < chunks.length && i < 5; i++) {
+            final web = chunks[i]['web'];
+            if (web != null) {
+              buffer.writeln(
+                '  ${i + 1}. ${web['title'] ?? 'Source'} - ${web['uri'] ?? ''}',
+              );
+            }
           }
         }
       }
-    }
 
-    return buffer.toString();
+      return buffer.toString();
+    } catch (e) {
+      debugPrint('[WebSearch] Gemini Grounding Exception: $e');
+      return null;
+    }
   }
 
   Future<String> _executeContext7(String query, String? libraryId) async {
@@ -589,22 +727,27 @@ class AgentService {
       // Step 1: Resolve Library ID if not provided
       String resolvedLibId = libraryId ?? "";
       if (resolvedLibId.isEmpty) {
-        final resolveUrl = Uri.parse('https://api.context7.com/v1/resolve-library-id');
-        final resolveResponse = await http.post(
-          resolveUrl,
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer $context7ApiKey',
-          },
-          body: jsonEncode({
-            'query': query,
-            'libraryName': query.split(' ').first, // Guessing the first word
-          }),
-        ).timeout(const Duration(seconds: 10));
+        final resolveUrl = Uri.parse(
+          'https://api.context7.com/v1/resolve-library-id',
+        );
+        final resolveResponse = await http
+            .post(
+              resolveUrl,
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer $context7ApiKey',
+              },
+              body: jsonEncode({
+                'query': query,
+                'libraryName': _extractLibraryName(query),
+              }),
+            )
+            .timeout(const Duration(seconds: 10));
 
         if (resolveResponse.statusCode == 200) {
           final resolveData = jsonDecode(resolveResponse.body);
-          if (resolveData['libraries'] != null && resolveData['libraries'].isNotEmpty) {
+          if (resolveData['libraries'] != null &&
+              resolveData['libraries'].isNotEmpty) {
             resolvedLibId = resolveData['libraries'][0]['libraryId'];
           }
         }
@@ -616,18 +759,20 @@ class AgentService {
 
       // Step 2: Query Docs
       final queryUrl = Uri.parse('https://api.context7.com/v1/query-docs');
-      final queryResponse = await http.post(
-        queryUrl,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $context7ApiKey',
-        },
-        body: jsonEncode({
-          'libraryId': resolvedLibId,
-          'query': query,
-          'researchMode': false,
-        }),
-      ).timeout(const Duration(seconds: 20));
+      final queryResponse = await http
+          .post(
+            queryUrl,
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $context7ApiKey',
+            },
+            body: jsonEncode({
+              'libraryId': resolvedLibId,
+              'query': query,
+              'researchMode': false,
+            }),
+          )
+          .timeout(const Duration(seconds: 20));
 
       if (queryResponse.statusCode != 200) {
         return "Context7 API error (${queryResponse.statusCode}): ${queryResponse.body}";
@@ -643,12 +788,13 @@ class AgentService {
   String _stripHtml(String htmlString) {
     final RegExp exp = RegExp(r'<[^>]*>', multiLine: true, caseSensitive: true);
     String result = htmlString.replaceAll(exp, '');
-    result = result.replaceAll('&#x27;', "'")
-                   .replaceAll('&quot;', '"')
-                   .replaceAll('&amp;', '&')
-                   .replaceAll('&lt;', '<')
-                   .replaceAll('&gt;', '>')
-                   .replaceAll('&nbsp;', ' ');
+    result = result
+        .replaceAll('&#x27;', "'")
+        .replaceAll('&quot;', '"')
+        .replaceAll('&amp;', '&')
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll('&nbsp;', ' ');
     return result.trim().replaceAll(RegExp(r'\s+'), ' ');
   }
 
@@ -656,20 +802,19 @@ class AgentService {
     String query,
     List<dynamic> historyList,
   ) async {
-    String baseUrl = provider == LLMProvider.groq 
-        ? "https://api.groq.com/openai/v1" 
-        : "https://openrouter.ai/api/v1";
+    String baseUrl =
+        provider == LLMProvider.groq
+            ? "https://api.groq.com/openai/v1"
+            : "https://openrouter.ai/api/v1";
 
     final calendarService = await CalendarService.create(googleSignIn);
-    if (calendarService == null) {
-      return "Error: Google Calendar not linked. Please sign in again.";
+    final taskService = await TaskService.create(googleSignIn);
+    if (calendarService == null || taskService == null) {
+      return "Error: Google Account not linked. Please sign in again.";
     }
 
     List<Map<String, dynamic>> messages = [
-      {
-        "role": "system",
-        "content": _getSystemInstructions(),
-      }
+      {"role": "system", "content": _getSystemInstructions()},
     ];
 
     // Add history
@@ -688,8 +833,10 @@ class AgentService {
         headers: {
           "Content-Type": "application/json",
           "Authorization": "Bearer $apiKey",
-          if(provider == LLMProvider.openrouter) "HTTP-Referer": "https://calendar-ai.app",
-          if(provider == LLMProvider.openrouter) "X-Title": "Calendar AI Agent",
+          if (provider == LLMProvider.openrouter)
+            "HTTP-Referer": "https://calendar-ai.app",
+          if (provider == LLMProvider.openrouter)
+            "X-Title": "Calendar AI Agent",
         },
         body: jsonEncode({
           "model": modelId,
@@ -700,7 +847,9 @@ class AgentService {
       );
 
       if (response.statusCode != 200) {
-        throw Exception("Provider Error (${response.statusCode}): ${response.body}");
+        throw Exception(
+          "Provider Error (${response.statusCode}): ${response.body}",
+        );
       }
 
       final data = jsonDecode(response.body);
@@ -719,7 +868,12 @@ class AgentService {
         String result = "";
 
         try {
-          result = await _executeTool(toolName, args, calendarService);
+          result = await _executeTool(
+            toolName,
+            args,
+            calendarService,
+            taskService,
+          );
         } catch (e) {
           result = "Tool error: $e";
         }
@@ -741,24 +895,21 @@ class AgentService {
     String? currentMimeType,
   }) async {
     final calendarService = await CalendarService.create(googleSignIn);
-    if (calendarService == null) {
-      return "Error: Google Calendar not linked. Please sign in again.";
+    final taskService = await TaskService.create(googleSignIn);
+    if (calendarService == null || taskService == null) {
+      return "Error: Google Account not linked. Please sign in again.";
     }
 
     final model = GenerativeModel(
       model: modelId,
       apiKey: apiKey,
-      tools: [
-        Tool(
-          functionDeclarations: _getGeminiTools(),
-        ),
-      ],
+      tools: [Tool(functionDeclarations: _getGeminiTools())],
       systemInstruction: Content.system(_getSystemInstructions()),
     );
 
     final mappedHistory = await _mapHistoryToGemini(historyList);
     final chatSession = model.startChat(history: mappedHistory);
-    
+
     // Create current turn parts
     List<Part> parts = [TextPart(query)];
     if (currentFileBytes != null && currentMimeType != null) {
@@ -775,7 +926,12 @@ class AgentService {
       for (final call in calls) {
         String callResult = "";
         try {
-          callResult = await _executeTool(call.name, call.args, calendarService);
+          callResult = await _executeTool(
+            call.name,
+            call.args,
+            calendarService,
+            taskService,
+          );
         } catch (e) {
           callResult = "Function error: $e";
         }
@@ -799,7 +955,9 @@ class AgentService {
         try {
           final file = File(turn['file_path']);
           if (await file.exists()) {
-            userParts.add(DataPart(turn['mime_type'], await file.readAsBytes()));
+            userParts.add(
+              DataPart(turn['mime_type'], await file.readAsBytes()),
+            );
           }
         } catch (e) {
           debugPrint("Failed to map history file: $e");
@@ -813,9 +971,15 @@ class AgentService {
     return history;
   }
 
-  Future<String> _executeTool(String name, Map<String, dynamic> args, CalendarService calendarService) async {
+  Future<String> _executeTool(
+    String name,
+    Map<String, dynamic> args,
+    CalendarService calendarService,
+    TaskService taskService,
+  ) async {
     // PASSIVE MEMORY SAFETY CHECK
-    if (name == 'save_to_personal_memory_tool' || name == 'query_personal_memory_tool') {
+    if (name == 'save_to_personal_memory_tool' ||
+        name == 'query_personal_memory_tool') {
       if (geminiApiKey == null || geminiApiKey!.trim().isEmpty) {
         return "SYSTEM MESSAGE: Memory tool failed. RAG operations require a dedicated Gemini API Key even when using other providers. Please add one in System Config.";
       }
@@ -830,15 +994,30 @@ class AgentService {
           location: args['location']?.toString() ?? "",
           description: args['description']?.toString() ?? "",
           colorName: args['color_name']?.toString(),
-          attendeeEmails: args['attendee_emails'] != null ? List<String>.from(args['attendee_emails']) : null,
+          attendeeEmails:
+              args['attendee_emails'] != null
+                  ? List<String>.from(args['attendee_emails'])
+                  : null,
           overwrite: args['overwrite'] == true,
         );
       case 'list_upcoming_events_tool':
         return await calendarService.listUpcomingEvents();
       case 'search_events_tool':
         return await calendarService.searchEvents(args['query'].toString());
+      case 'update_event_tool':
+        return await calendarService.updateEvent(
+          args['event_id'].toString(),
+          summary: args['summary']?.toString(),
+          startStr: args['start']?.toString(),
+          endStr: args['end']?.toString(),
+          location: args['location']?.toString(),
+          description: args['description']?.toString(),
+          colorName: args['color_name']?.toString(),
+        );
       case 'delete_event_tool':
-        return await calendarService.deleteEventById(args['event_id'].toString());
+        return await calendarService.deleteEventById(
+          args['event_id'].toString(),
+        );
       case 'save_to_personal_memory_tool':
         String contentToSave = args['content'].toString();
         String sourceType = args['source_type']?.toString() ?? 'Personal';
@@ -847,9 +1026,9 @@ class AgentService {
         final refinedContent = await _refineMemoryContent(contentToSave);
 
         return await MemoryService.indexDocument(
-          userEmail, 
-          refinedContent, 
-          geminiApiKey!, 
+          userEmail,
+          refinedContent,
+          geminiApiKey!,
           sourceType: sourceType,
           metadata: {
             'original_text': contentToSave,
@@ -857,11 +1036,30 @@ class AgentService {
           },
         );
       case 'query_personal_memory_tool':
-        return await MemoryService.queryMemory(userEmail, args['query'].toString(), geminiApiKey!);
+        return await MemoryService.queryMemory(
+          userEmail,
+          args['query'].toString(),
+          geminiApiKey!,
+        );
       case 'web_search_tool':
         return await _performWebSearch(args['query'].toString());
       case 'context7_tool':
-        return await _executeContext7(args['query'].toString(), args['library_id']?.toString());
+        return await _executeContext7(
+          args['query'].toString(),
+          args['library_id']?.toString(),
+        );
+      case 'list_tasks_tool':
+        return await taskService.listTasks();
+      case 'create_task_tool':
+        return await taskService.createTask(
+          args['title'].toString(),
+          notes: args['notes']?.toString() ?? "",
+          due: args['due']?.toString(),
+        );
+      case 'complete_task_tool':
+        return await taskService.completeTask(args['task_id'].toString());
+      case 'delete_task_tool':
+        return await taskService.deleteTask(args['task_id'].toString());
       default:
         return "Error: Unknown tool $name";
     }
@@ -873,12 +1071,14 @@ class AgentService {
 - **Context Awareness**: Today is ${DateTime.now().toString()}. Use device-local timezone.
 - **Proactive Retrieval**: ALWAYS query `query_personal_memory_tool` first for any user preferences, history, or past interactions to ensure a personalized experience—not just for file context. 
 - **Web Search First for Unknown Facts**: If the user asks about real-time information, current events, schedules, news, scores, weather, sports fixtures, upcoming dates, or anything beyond your training data — you MUST call `web_search_tool` BEFORE answering. NEVER refuse a factual query by saying "I don't have access to that information" or "this is too far in the future." You have a web search tool — USE IT. If the search returns results, synthesize them. If it fails, tell the user the search failed and suggest they try again.
-- **Technical Documentation**: For coding/library questions, prefer `context7_tool` to fetch live documentation.
+- **Technical Documentation**: For coding/library questions, prefer `context7_tool` to fetch live documentation. Explicitly extract the library name (e.g., "Next.js", "React", "Prisma") to provide as context.
 - **Proactive Scheduling**: Parse documents (Images/PDFs) to identify "Single Events" vs "Timetables".
+- **Task Management**: You can also list, create, complete, and delete tasks. Do not confuse tasks with events.
 - **Conflict Vigilance**: Always call `list_upcoming_events_tool` before scheduling any new events.
 - **Ambiguity Gate**: Ask clarifying questions before bulk-scheduling if data is unclear.
-- **Visual Callouts**: Use bold 🚨 **CONFLICT DETECTED** 🚨 for overlapping events.
-- **Resolution**: Use `overwrite: true` only if user asks to "replace", "fix", or "overwrite" a conflict.
+- **Visual Callouts**: If a conflict is detected by the tools, you MUST start your response with 🚨 **CONFLICT DETECTED** 🚨 in large bold text. DO NOT omit the emojis. List the conflicting events clearly.
+- **Resolution**: Use `overwrite: true` only if the user explicitly asks to "replace", "fix", "overwrite", or "ignore" a conflict. Otherwise, ALWAYS ask for confirmation.
+- **Updating Events**: ALWAYS use `update_event_tool` to modify an existing event (e.g., change its time, color, or name) instead of deleting and recreating it.
 
 ### CONSTRAINTS
 - **Access Authority**: Never claim you lack access to the calendar. Use tools.
@@ -892,6 +1092,7 @@ class AgentService {
 - Final confirmation summarizing all actions performed.
 ''';
   }
+
   List<FunctionDeclaration> _getGeminiTools() {
     return [
       FunctionDeclaration(
@@ -901,13 +1102,41 @@ class AgentService {
           SchemaType.object,
           properties: {
             'summary': Schema(SchemaType.string, description: 'Event title'),
-            'start': Schema(SchemaType.string, description: 'Start time in ISO format'),
-            'end': Schema(SchemaType.string, description: 'End time in ISO format'),
-            'location': Schema(SchemaType.string, description: 'Event location', nullable: true),
-            'description': Schema(SchemaType.string, description: 'Event description', nullable: true),
-            'color_name': Schema(SchemaType.string, description: 'Color name (lavender, sage, etc.)', nullable: true),
-            'attendee_emails': Schema(SchemaType.array, items: Schema(SchemaType.string), description: 'List of attendee emails', nullable: true),
-            'overwrite': Schema(SchemaType.boolean, description: 'If true, conflicting events will be deleted and replaced by this new one.', nullable: true),
+            'start': Schema(
+              SchemaType.string,
+              description: 'Start time in ISO format',
+            ),
+            'end': Schema(
+              SchemaType.string,
+              description: 'End time in ISO format',
+            ),
+            'location': Schema(
+              SchemaType.string,
+              description: 'Event location',
+              nullable: true,
+            ),
+            'description': Schema(
+              SchemaType.string,
+              description: 'Event description',
+              nullable: true,
+            ),
+            'color_name': Schema(
+              SchemaType.string,
+              description: 'Color name (lavender, sage, etc.)',
+              nullable: true,
+            ),
+            'attendee_emails': Schema(
+              SchemaType.array,
+              items: Schema(SchemaType.string),
+              description: 'List of attendee emails',
+              nullable: true,
+            ),
+            'overwrite': Schema(
+              SchemaType.boolean,
+              description:
+                  'If true, conflicting events will be deleted and replaced by this new one.',
+              nullable: true,
+            ),
           },
           requiredProperties: ['summary', 'start', 'end'],
         ),
@@ -923,7 +1152,10 @@ class AgentService {
         Schema(
           SchemaType.object,
           properties: {
-            'query': Schema(SchemaType.string, description: 'Search term or keyword'),
+            'query': Schema(
+              SchemaType.string,
+              description: 'Search term or keyword',
+            ),
           },
           requiredProperties: ['query'],
         ),
@@ -934,7 +1166,55 @@ class AgentService {
         Schema(
           SchemaType.object,
           properties: {
-            'event_id': Schema(SchemaType.string, description: 'ID of the event to delete'),
+            'event_id': Schema(
+              SchemaType.string,
+              description: 'ID of the event to delete',
+            ),
+          },
+          requiredProperties: ['event_id'],
+        ),
+      ),
+      FunctionDeclaration(
+        'update_event_tool',
+        'Updates an existing event in the Google Calendar without deleting it. Use this to change event time, color, summary, etc.',
+        Schema(
+          SchemaType.object,
+          properties: {
+            'event_id': Schema(
+              SchemaType.string,
+              description: 'ID of the event to update',
+            ),
+            'summary': Schema(
+              SchemaType.string,
+              description: 'New event title',
+              nullable: true,
+            ),
+            'start': Schema(
+              SchemaType.string,
+              description: 'New start time in ISO format',
+              nullable: true,
+            ),
+            'end': Schema(
+              SchemaType.string,
+              description: 'New end time in ISO format',
+              nullable: true,
+            ),
+            'location': Schema(
+              SchemaType.string,
+              description: 'New event location',
+              nullable: true,
+            ),
+            'description': Schema(
+              SchemaType.string,
+              description: 'New event description',
+              nullable: true,
+            ),
+            'color_name': Schema(
+              SchemaType.string,
+              description:
+                  'New color name (lavender, sage, tomato, flamingo, banana, tangerine, peacock, graphite, blueberry, basil, grape)',
+              nullable: true,
+            ),
           },
           requiredProperties: ['event_id'],
         ),
@@ -945,9 +1225,12 @@ class AgentService {
         Schema(
           SchemaType.object,
           properties: {
-            'content': Schema(SchemaType.string, description: 'The text snippet or document summary to save.'),
+            'content': Schema(
+              SchemaType.string,
+              description: 'The text snippet or document summary to save.',
+            ),
             'source_type': Schema(
-              SchemaType.string, 
+              SchemaType.string,
               description: 'Category of the information.',
               enumValues: ['Personal', 'Document', 'Calendar'],
               nullable: true,
@@ -962,7 +1245,10 @@ class AgentService {
         Schema(
           SchemaType.object,
           properties: {
-            'query': Schema(SchemaType.string, description: 'The search term or question to look up.'),
+            'query': Schema(
+              SchemaType.string,
+              description: 'The search term or question to look up.',
+            ),
           },
           requiredProperties: ['query'],
         ),
@@ -973,7 +1259,10 @@ class AgentService {
         Schema(
           SchemaType.object,
           properties: {
-            'query': Schema(SchemaType.string, description: 'The search term or question to look up.'),
+            'query': Schema(
+              SchemaType.string,
+              description: 'The search term or question to look up.',
+            ),
           },
           requiredProperties: ['query'],
         ),
@@ -984,10 +1273,71 @@ class AgentService {
         Schema(
           SchemaType.object,
           properties: {
-            'query': Schema(SchemaType.string, description: 'The technical question or documentation topic.'),
-            'library_id': Schema(SchemaType.string, description: 'Optional library ID like /vercel/next.js', nullable: true),
+            'query': Schema(
+              SchemaType.string,
+              description: 'The technical question or documentation topic.',
+            ),
+            'library_id': Schema(
+              SchemaType.string,
+              description: 'Optional library ID like /vercel/next.js',
+              nullable: true,
+            ),
           },
           requiredProperties: ['query'],
+        ),
+      ),
+      FunctionDeclaration(
+        'list_tasks_tool',
+        'Lists the user\'s pending tasks.',
+        Schema(SchemaType.object, properties: {}),
+      ),
+      FunctionDeclaration(
+        'create_task_tool',
+        'Creates a new task.',
+        Schema(
+          SchemaType.object,
+          properties: {
+            'title': Schema(SchemaType.string, description: 'Task title'),
+            'notes': Schema(
+              SchemaType.string,
+              description: 'Task notes',
+              nullable: true,
+            ),
+            'due': Schema(
+              SchemaType.string,
+              description: 'Due date in ISO format',
+              nullable: true,
+            ),
+          },
+          requiredProperties: ['title'],
+        ),
+      ),
+      FunctionDeclaration(
+        'complete_task_tool',
+        'Marks a specific task as completed.',
+        Schema(
+          SchemaType.object,
+          properties: {
+            'task_id': Schema(
+              SchemaType.string,
+              description: 'ID of the task to complete',
+            ),
+          },
+          requiredProperties: ['task_id'],
+        ),
+      ),
+      FunctionDeclaration(
+        'delete_task_tool',
+        'Deletes a specific task.',
+        Schema(
+          SchemaType.object,
+          properties: {
+            'task_id': Schema(
+              SchemaType.string,
+              description: 'ID of the task to delete',
+            ),
+          },
+          requiredProperties: ['task_id'],
         ),
       ),
     ];
@@ -998,10 +1348,11 @@ class AgentService {
     try {
       // Use the designated Gemini key and a reliable model for refinement
       final model = GenerativeModel(
-        model: 'gemini-1.5-flash', // Use a valid, high-speed model for refinement
+        model:
+            'gemini-2.5-flash', // Use a valid, high-speed model for refinement
         apiKey: geminiApiKey!,
       );
-      
+
       final prompt = '''
 REFINEMENT TASK: Transform the following messy, conversational, or document-fragment text into a "Clean Fact".
 A "Clean Fact" is a single, atomic, declarative sentence that is easy to search later via RAG.
@@ -1030,7 +1381,10 @@ CLEAN FACT:''';
   Future<String> _generateBackgroundLLMResponse(String prompt) async {
     try {
       if (geminiApiKey == null || geminiApiKey!.trim().isEmpty) return "";
-      final model = GenerativeModel(model: 'gemini-1.5-flash', apiKey: geminiApiKey!);
+      final model = GenerativeModel(
+        model: 'gemini-2.5-flash',
+        apiKey: geminiApiKey!,
+      );
       final response = await model.generateContent([Content.text(prompt)]);
       return response.text ?? "";
     } catch (e) {
@@ -1039,10 +1393,9 @@ CLEAN FACT:''';
     }
   }
 
-
-
   Future<String> takeContextSnapshot() async {
-    if (geminiApiKey == null || geminiApiKey!.trim().isEmpty) return "SKIPPED: No Gemini API Key for background task.";
+    if (geminiApiKey == null || geminiApiKey!.trim().isEmpty)
+      return "SKIPPED: No Gemini API Key for background task.";
 
     final prefs = await SharedPreferences.getInstance();
     final String rawHistory =
@@ -1095,6 +1448,25 @@ ${historyList.asMap().entries.map((e) => "TURN ${e.key + 1}:\nUser: ${e.value['u
 
     return "SNAPSHOT COMPLETE: $indexedCount significant facts indexed.";
   }
+
+  String _extractLibraryName(String query) {
+    final commonLibraries = [
+      'react', 'next.js', 'nextjs', 'flutter', 'dart', 'prisma', 'supabase',
+      'tailwind', 'express', 'django', 'spring boot', 'laravel', 'vue',
+      'angular', 'typescript', 'javascript', 'python', 'rust', 'go', 'golang',
+      'firebase', 'mongodb', 'postgresql', 'mysql', 'redis', 'docker',
+      'kubernetes', 'aws', 'azure', 'gcp', 'vercel', 'netlify'
+    ];
+
+    final lowercaseQuery = query.toLowerCase();
+    for (final lib in commonLibraries) {
+      if (lowercaseQuery.contains(lib)) {
+        return lib;
+      }
+    }
+
+    // Fallback: Return first word if it's more than 3 chars, otherwise the whole query
+    final firstWord = query.split(' ').first;
+    return firstWord.length > 3 ? firstWord : query;
+  }
 }
-
-

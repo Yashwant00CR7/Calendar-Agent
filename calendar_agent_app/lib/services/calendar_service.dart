@@ -49,8 +49,9 @@ class CalendarService {
 
       if (conflicts.isNotEmpty) {
         if (!overwrite) {
-          final conflictDetails = conflicts.map((e) => "${e.summary} (${e.start?.dateTime ?? e.start?.date})").join(', ');
-          return "🚨 CONFLICT DETECTED 🚨: The time slot overlaps with existing event(s): $conflictDetails. "
+          final conflictDetails = conflicts.map((e) => "- ${e.summary} (${e.start?.dateTime ?? e.start?.date})").join('\n');
+          return "🚨 **CONFLICT DETECTED** 🚨\n\n"
+                 "The requested time slot overlaps with the following event(s):\n$conflictDetails\n\n"
                  "To proceed, you must use the `overwrite: true` parameter, but please ask the user for confirmation first.";
         } else {
           // Delete conflicting events
@@ -66,6 +67,7 @@ class CalendarService {
         ..summary = summary
         ..location = location
         ..description = description
+        ..colorId = _getColorId(colorName)
         ..start = (EventDateTime()..dateTime = start)
         ..end = (EventDateTime()..dateTime = end);
 
@@ -136,6 +138,58 @@ class CalendarService {
       return "Event $eventId deleted successfully.";
     } catch (e) {
       return "Failed to delete event: $e";
+    }
+  }
+
+  Future<String> updateEvent(
+    String eventId, {
+    String? summary,
+    String? startStr,
+    String? endStr,
+    String? location,
+    String? description,
+    String? colorName,
+  }) async {
+    try {
+      final event = await _calendarApi.events.get('primary', eventId);
+
+      if (summary != null) event.summary = summary;
+      if (location != null) event.location = location;
+      if (description != null) event.description = description;
+      
+      if (colorName != null) {
+        event.colorId = _getColorId(colorName);
+      }
+
+      if (startStr != null) {
+        event.start = EventDateTime()..dateTime = DateTime.parse(startStr).toUtc();
+      }
+      if (endStr != null) {
+        event.end = EventDateTime()..dateTime = DateTime.parse(endStr).toUtc();
+      }
+
+      final updatedEvent = await _calendarApi.events.update(event, 'primary', eventId);
+      return "Event updated successfully: ${updatedEvent.summary} (${updatedEvent.htmlLink})";
+    } catch (e) {
+      return "Failed to update event: $e";
+    }
+  }
+
+  String? _getColorId(String? colorName) {
+    if (colorName == null) return null;
+    switch (colorName.toLowerCase().trim()) {
+      case 'lavender': return '1';
+      case 'sage': return '2';
+      case 'grape': return '3';
+      case 'flamingo': return '4';
+      case 'banana': return '5';
+      case 'tangerine': return '6';
+      case 'peacock': return '7';
+      case 'graphite': return '8';
+      case 'blueberry': return '9';
+      case 'basil': return '10';
+      case 'tomato': return '11';
+      default: return null;
     }
   }
 }
