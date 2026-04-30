@@ -727,60 +727,78 @@ class AgentService {
       // Step 1: Resolve Library ID if not provided
       String resolvedLibId = libraryId ?? "";
       if (resolvedLibId.isEmpty) {
+        final libName = _extractLibraryName(query);
+        debugPrint('[Context7] Searching for library: $libName');
+        
         final resolveUrl = Uri.parse(
-          'https://api.context7.com/v1/resolve-library-id',
+          'https://context7.com/api/v2/libs/search?libraryName=${Uri.encodeComponent(libName)}&query=${Uri.encodeComponent(query)}',
         );
-        final resolveResponse = await http
-            .post(
-              resolveUrl,
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': 'Bearer $context7ApiKey',
-              },
-              body: jsonEncode({
-                'query': query,
-                'libraryName': _extractLibraryName(query),
-              }),
-            )
-            .timeout(const Duration(seconds: 10));
+        final resolveResponse = await http.get(
+          resolveUrl,
+          headers: {
+            'Authorization': 'Bearer $context7ApiKey',
+            'Accept': 'application/json',
+          },
+        ).timeout(const Duration(seconds: 15));
 
         if (resolveResponse.statusCode == 200) {
           final resolveData = jsonDecode(resolveResponse.body);
-          if (resolveData['libraries'] != null &&
-              resolveData['libraries'].isNotEmpty) {
-            resolvedLibId = resolveData['libraries'][0]['libraryId'];
+          List<dynamic>? results;
+          
+          if (resolveData is List) {
+            results = resolveData;
+          } else if (resolveData is Map && resolveData['results'] is List) {
+            results = resolveData['results'];
           }
+
+          if (results != null && results.isNotEmpty) {
+            resolvedLibId = results[0]['id'] ?? "";
+            debugPrint('[Context7] Resolved ID: $resolvedLibId');
+          }
+        } else {
+          debugPrint('[Context7] Search Failed: ${resolveResponse.statusCode} - ${resolveResponse.body}');
         }
       }
 
       if (resolvedLibId.isEmpty) {
-        return "Could not resolve library ID for '$query'. Please try specifying a library name.";
+        return "Could not resolve library ID for '$query'. Please try specifying a library name like 'Next.js' or 'React'.";
       }
 
       // Step 2: Query Docs
-      final queryUrl = Uri.parse('https://api.context7.com/v1/query-docs');
-      final queryResponse = await http
-          .post(
-            queryUrl,
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer $context7ApiKey',
-            },
-            body: jsonEncode({
-              'libraryId': resolvedLibId,
-              'query': query,
-              'researchMode': false,
-            }),
-          )
-          .timeout(const Duration(seconds: 20));
+      debugPrint('[Context7] Querying docs for $resolvedLibId with query: $query');
+      final queryUrl = Uri.parse(
+        'https://context7.com/api/v2/context?libraryId=${Uri.encodeComponent(resolvedLibId)}&query=${Uri.encodeComponent(query)}',
+      );
+      final queryResponse = await http.get(
+        queryUrl,
+        headers: {
+          'Authorization': 'Bearer $context7ApiKey',
+          'Accept': 'application/json',
+        },
+      ).timeout(const Duration(seconds: 30));
 
       if (queryResponse.statusCode != 200) {
+        debugPrint('[Context7] Query Failed: ${queryResponse.statusCode} - ${queryResponse.body}');
         return "Context7 API error (${queryResponse.statusCode}): ${queryResponse.body}";
       }
 
       final queryData = jsonDecode(queryResponse.body);
-      return queryData['answer'] ?? "No documentation found for '$query'.";
+      
+      // API v2 structure handling
+      dynamic content;
+      if (queryData is Map) {
+        content = queryData['data'] ?? queryData['answer'] ?? queryData['content'];
+      } else {
+        content = queryData;
+      }
+
+      if (content == null) {
+        return "No specific documentation found for '$query' in $resolvedLibId.";
+      }
+
+      return content.toString();
     } catch (e) {
+      debugPrint('[Context7] Exception: $e');
       return "Context7 execution failed: $e";
     }
   }
@@ -1455,18 +1473,34 @@ ${historyList.asMap().entries.map((e) => "TURN ${e.key + 1}:\nUser: ${e.value['u
       'tailwind', 'express', 'django', 'spring boot', 'laravel', 'vue',
       'angular', 'typescript', 'javascript', 'python', 'rust', 'go', 'golang',
       'firebase', 'mongodb', 'postgresql', 'mysql', 'redis', 'docker',
-      'kubernetes', 'aws', 'azure', 'gcp', 'vercel', 'netlify'
+      'kubernetes', 'aws', 'azure', 'gcp', 'vercel', 'netlify', 'stripe',
+      'clerk', 'auth0', 'openai', 'gemini', 'anthropic', 'langchain'
     ];
 
     final lowercaseQuery = query.toLowerCase();
+    
+    // Check for explicit matches first
     for (final lib in commonLibraries) {
       if (lowercaseQuery.contains(lib)) {
         return lib;
       }
     }
 
-    // Fallback: Return first word if it's more than 3 chars, otherwise the whole query
-    final firstWord = query.split(' ').first;
-    return firstWord.length > 3 ? firstWord : query;
+    // Try to find capitalized proper nouns or quoted terms
+    final quotedMatch = RegExp(r'"([^"]+)"').firstMatch(query);
+    if (quotedMatch != null) return quotedMatch.group(1)!;
+
+    // Fallback: Use the most likely candidate from the first 2 words
+    final words = query.split(RegExp(r'\s+')).where((w) => w.length > 2).toList();
+    if (words.isNotEmpty) {
+      // If the first word is "how", "what", etc., take the next one
+      final stopWords = ['how', 'what', 'can', 'the', 'why', 'where'];
+      if (stopWords.contains(words[0].toLowerCase()) && words.length > 1) {
+        return words[1];
+      }
+      return words[0];
+    }
+
+    return query;
   }
 }
