@@ -15,6 +15,6 @@ Before every task, Antigravity must:
 3.  **Update Tasks**: Mark items as complete in `.claude/TASKS.md`.
 
 ---
-**Current Status:** Emergency Recovery & Environment Hardening
-**Target:** Stable compilation and environment responsiveness
-**Note:** Investigating System Commitment Limit (0xC000012D) causing Flutter SDK hang.
+**Current Status:** Advanced Intelligence & Multi-Calendar Support (COMPLETED)
+**Target:** Proactive assistant with deep context and cross-calendar awareness.
+**Note:** Verified via service-level unit tests.

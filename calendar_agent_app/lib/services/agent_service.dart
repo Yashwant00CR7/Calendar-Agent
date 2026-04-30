@@ -49,6 +49,11 @@ class AgentService {
   final String sessionId;
   final String? tavilyApiKey;
   final String? context7ApiKey;
+  
+  // Injectable dependencies for testing
+  CalendarService? _calendarService;
+  TaskService? _taskService;
+  final http.Client _httpClient;
 
   AgentService({
     this.provider = LLMProvider.gemini,
@@ -60,7 +65,13 @@ class AgentService {
     required this.modelId,
     required this.sessionId,
     this.googleSignIn,
-  }) : userEmail = userEmail.trim().toLowerCase();
+    CalendarService? calendarService,
+    TaskService? taskService,
+    http.Client? httpClient,
+  }) : userEmail = userEmail.trim().toLowerCase(),
+       _calendarService = calendarService,
+       _taskService = taskService,
+       _httpClient = httpClient ?? http.Client();
 
   Future<String> chat(
     String query, [
@@ -233,6 +244,11 @@ class AgentService {
                 "type": "boolean",
                 "description":
                     "If true, conflicting events will be deleted and replaced.",
+              },
+              "rrule": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "RRULE strings for recurring events (e.g., ['RRULE:FREQ=WEEKLY;BYDAY=MO']).",
               },
             },
             "required": ["summary", "start", "end"],
@@ -485,7 +501,7 @@ class AgentService {
   /// designed for low-bandwidth / terminal browsers.
   Future<String?> _searchViaDuckDuckGoLite(String query) async {
     final url = Uri.parse('https://duckduckgo.com/lite/');
-    final response = await http
+    final response = await _httpClient
         .post(
           url,
           headers: {
@@ -543,7 +559,7 @@ class AgentService {
       'https://search.brave.com/api/web?q=${Uri.encodeComponent(query)}&count=5&safesearch=moderate',
     );
 
-    final response = await http
+    final response = await _httpClient
         .get(
           url,
           headers: {
@@ -596,7 +612,7 @@ class AgentService {
 
   Future<String?> _searchViaTavily(String query) async {
     final url = Uri.parse('https://api.tavily.com/search');
-    final response = await http
+    final response = await _httpClient
         .post(
           url,
           headers: {'Content-Type': 'application/json'},
@@ -645,7 +661,7 @@ class AgentService {
     );
 
     try {
-      final response = await http
+      final response = await _httpClient
           .post(
             url,
             headers: {'Content-Type': 'application/json'},
@@ -733,7 +749,7 @@ class AgentService {
         final resolveUrl = Uri.parse(
           'https://context7.com/api/v2/libs/search?libraryName=${Uri.encodeComponent(libName)}&query=${Uri.encodeComponent(query)}',
         );
-        final resolveResponse = await http.get(
+        final resolveResponse = await _httpClient.get(
           resolveUrl,
           headers: {
             'Authorization': 'Bearer $context7ApiKey',
@@ -769,7 +785,7 @@ class AgentService {
       final queryUrl = Uri.parse(
         'https://context7.com/api/v2/context?libraryId=${Uri.encodeComponent(resolvedLibId)}&query=${Uri.encodeComponent(query)}',
       );
-      final queryResponse = await http.get(
+      final queryResponse = await _httpClient.get(
         queryUrl,
         headers: {
           'Authorization': 'Bearer $context7ApiKey',
@@ -825,8 +841,12 @@ class AgentService {
             ? "https://api.groq.com/openai/v1"
             : "https://openrouter.ai/api/v1";
 
-    final calendarService = await CalendarService.create(googleSignIn);
-    final taskService = await TaskService.create(googleSignIn);
+    _calendarService ??= await CalendarService.create(googleSignIn);
+    _taskService ??= await TaskService.create(googleSignIn);
+    
+    final calendarService = _calendarService;
+    final taskService = _taskService;
+    
     if (calendarService == null || taskService == null) {
       return "Error: Google Account not linked. Please sign in again.";
     }
@@ -846,7 +866,7 @@ class AgentService {
     final tools = _mapToolsToOpenAI();
 
     while (true) {
-      final response = await http.post(
+      final response = await _httpClient.post(
         Uri.parse("$baseUrl/chat/completions"),
         headers: {
           "Content-Type": "application/json",
@@ -886,7 +906,7 @@ class AgentService {
         String result = "";
 
         try {
-          result = await _executeTool(
+          result = await executeTool(
             toolName,
             args,
             calendarService,
@@ -912,8 +932,12 @@ class AgentService {
     Uint8List? currentFileBytes,
     String? currentMimeType,
   }) async {
-    final calendarService = await CalendarService.create(googleSignIn);
-    final taskService = await TaskService.create(googleSignIn);
+    _calendarService ??= await CalendarService.create(googleSignIn);
+    _taskService ??= await TaskService.create(googleSignIn);
+    
+    final calendarService = _calendarService;
+    final taskService = _taskService;
+    
     if (calendarService == null || taskService == null) {
       return "Error: Google Account not linked. Please sign in again.";
     }
@@ -944,7 +968,7 @@ class AgentService {
       for (final call in calls) {
         String callResult = "";
         try {
-          callResult = await _executeTool(
+          callResult = await executeTool(
             call.name,
             call.args,
             calendarService,
@@ -989,7 +1013,7 @@ class AgentService {
     return history;
   }
 
-  Future<String> _executeTool(
+  Future<String> executeTool(
     String name,
     Map<String, dynamic> args,
     CalendarService calendarService,
@@ -1012,29 +1036,48 @@ class AgentService {
           location: args['location']?.toString() ?? "",
           description: args['description']?.toString() ?? "",
           colorName: args['color_name']?.toString(),
+          calendarId: args['calendar_id']?.toString(),
           attendeeEmails:
               args['attendee_emails'] != null
-                  ? List<String>.from(args['attendee_emails'])
-                  : null,
+                   ? List<String>.from(args['attendee_emails'])
+                   : null,
+          rrule: 
+              args['rrule'] != null
+                   ? List<String>.from(args['rrule'])
+                   : null,
           overwrite: args['overwrite'] == true,
         );
       case 'list_upcoming_events_tool':
-        return await calendarService.listUpcomingEvents();
+        return await calendarService.listUpcomingEvents(
+          calendarId: args['calendar_id']?.toString(),
+        );
       case 'search_events_tool':
-        return await calendarService.searchEvents(args['query'].toString());
+        return await calendarService.searchEvents(
+          args['query'].toString(),
+          calendarId: args['calendar_id']?.toString(),
+        );
+      case 'list_calendars_tool':
+        return await calendarService.listCalendars();
+      case 'reschedule_event_tool':
+        return await calendarService.updateEvent(
+          args['event_id'].toString(),
+          startStr: args['start'].toString(),
+          endStr: args['end'].toString(),
+          calendarId: args['calendar_id']?.toString(),
+        );
       case 'update_event_tool':
         return await calendarService.updateEvent(
           args['event_id'].toString(),
           summary: args['summary']?.toString(),
-          startStr: args['start']?.toString(),
-          endStr: args['end']?.toString(),
           location: args['location']?.toString(),
           description: args['description']?.toString(),
           colorName: args['color_name']?.toString(),
+          calendarId: args['calendar_id']?.toString(),
         );
       case 'delete_event_tool':
         return await calendarService.deleteEventById(
           args['event_id'].toString(),
+          calendarId: args['calendar_id']?.toString(),
         );
       case 'save_to_personal_memory_tool':
         String contentToSave = args['content'].toString();
@@ -1090,18 +1133,14 @@ class AgentService {
 - **Proactive Retrieval**: ALWAYS query `query_personal_memory_tool` first for any user preferences, history, or past interactions to ensure a personalized experience—not just for file context. 
 - **Web Search First for Unknown Facts**: If the user asks about real-time information, current events, schedules, news, scores, weather, sports fixtures, upcoming dates, or anything beyond your training data — you MUST call `web_search_tool` BEFORE answering. NEVER refuse a factual query by saying "I don't have access to that information" or "this is too far in the future." You have a web search tool — USE IT. If the search returns results, synthesize them. If it fails, tell the user the search failed and suggest they try again.
 - **Technical Documentation**: For coding/library questions, prefer `context7_tool` to fetch live documentation. Explicitly extract the library name (e.g., "Next.js", "React", "Prisma") to provide as context.
-- **Proactive Scheduling**: Parse documents (Images/PDFs) to identify "Single Events" vs "Timetables".
+- **Proactive Scheduling & Conflict Resolution**: Parse documents (Images/PDFs) to identify "Single Events" vs "Timetables". If a conflict is detected when scheduling, **proactively offer the alternative free slots** provided by the tool. Do not wait for the user to ask "when am I free?".
 - **Task Management**: You can also list, create, complete, and delete tasks. Do not confuse tasks with events.
 - **Conflict Vigilance**: Always call `list_upcoming_events_tool` before scheduling any new events.
+- **Recurring Events**: If the user mentions "every [day]", "weekly", "monthly", or any repeating pattern, use the `rrule` parameter in `schedule_event_tool`. You are responsible for generating the correct RRULE string (e.g., "RRULE:FREQ=WEEKLY;BYDAY=MO,WE").
 - **Ambiguity Gate**: Ask clarifying questions before bulk-scheduling if data is unclear.
-- **Visual Callouts**: If a conflict is detected by the tools, you MUST start your response with 🚨 **CONFLICT DETECTED** 🚨 in large bold text. DO NOT omit the emojis. List the conflicting events clearly.
-- **Resolution**: Use `overwrite: true` only if the user explicitly asks to "replace", "fix", "overwrite", or "ignore" a conflict. Otherwise, ALWAYS ask for confirmation.
-- **Updating Events**: ALWAYS use `update_event_tool` to modify an existing event (e.g., change its time, color, or name) instead of deleting and recreating it.
-
-### CONSTRAINTS
-- **Access Authority**: Never claim you lack access to the calendar. Use tools.
-- **No Refusals for Searchable Facts**: Never say "I cannot find" or "not yet available" for ANY factual query. Always attempt `web_search_tool` first.
-- **Privacy**: Never share or index data across user boundaries.
+- **Visual Callouts**: If a conflict is detected by the tools, you MUST start your response with 🚨 **CONFLICT DETECTED** 🚨 in large bold text. DO NOT omit the emojis. List the conflicting events clearly and **immediately suggest the next 3 available free slots**.
+- **Resolution**: Use `overwrite: true` only if the user explicitly asks to "replace", "fix", "overwrite", or "ignore" a conflict. Otherwise, ALWAYS offer to reschedule to a free slot or ask for confirmation.
+- **Updating/Rescheduling Events**: ALWAYS use `reschedule_event_tool` or `update_event_tool` to modify an existing event (e.g., change its time, color, or name) instead of deleting and recreating it.
 - **Autonomous Memory**: Automatically identify and save durable user preferences, recurring habits, and life-facts using the save_to_personal_memory_tool as they emerge in conversation. Do not wait for explicit permission to remember important details.
 - **Minimal Preamble**: Do not explain your tools; just execute and provide a clear summary.
 
@@ -1155,14 +1194,40 @@ class AgentService {
                   'If true, conflicting events will be deleted and replaced by this new one.',
               nullable: true,
             ),
+            'rrule': Schema(
+              SchemaType.array,
+              items: Schema(SchemaType.string),
+              description:
+                  'RRULE strings for recurring events (e.g., ["RRULE:FREQ=WEEKLY;BYDAY=MO"]).',
+              nullable: true,
+            ),
+            'calendar_id': Schema(
+              SchemaType.string,
+              description: 'The ID of the calendar to use. Defaults to "primary".',
+              nullable: true,
+            ),
           },
           requiredProperties: ['summary', 'start', 'end'],
         ),
       ),
       FunctionDeclaration(
+        'list_calendars_tool',
+        'Lists all available Google Calendars for the user.',
+        Schema(SchemaType.object, properties: {}),
+      ),
+      FunctionDeclaration(
         'list_upcoming_events_tool',
         'Lists the user\'s upcoming 10 calendar events.',
-        Schema(SchemaType.object, properties: {}),
+        Schema(
+          SchemaType.object,
+          properties: {
+            'calendar_id': Schema(
+              SchemaType.string,
+              description: 'The ID of the calendar to list events from. Defaults to "primary".',
+              nullable: true,
+            ),
+          },
+        ),
       ),
       FunctionDeclaration(
         'search_events_tool',
@@ -1174,8 +1239,40 @@ class AgentService {
               SchemaType.string,
               description: 'Search term or keyword',
             ),
+            'calendar_id': Schema(
+              SchemaType.string,
+              description: 'The ID of the calendar to search in. Defaults to "primary".',
+              nullable: true,
+            ),
           },
           requiredProperties: ['query'],
+        ),
+      ),
+      FunctionDeclaration(
+        'reschedule_event_tool',
+        'Moves an existing event to a new time slot. Use this when a conflict is detected to suggest a better time.',
+        Schema(
+          SchemaType.object,
+          properties: {
+            'event_id': Schema(
+              SchemaType.string,
+              description: 'ID of the event to move',
+            ),
+            'start': Schema(
+              SchemaType.string,
+              description: 'New start time in ISO format',
+            ),
+            'end': Schema(
+              SchemaType.string,
+              description: 'New end time in ISO format',
+            ),
+            'calendar_id': Schema(
+              SchemaType.string,
+              description: 'The ID of the calendar where the event exists. Defaults to "primary".',
+              nullable: true,
+            ),
+          },
+          requiredProperties: ['event_id', 'start', 'end'],
         ),
       ),
       FunctionDeclaration(
@@ -1188,13 +1285,18 @@ class AgentService {
               SchemaType.string,
               description: 'ID of the event to delete',
             ),
+            'calendar_id': Schema(
+              SchemaType.string,
+              description: 'The ID of the calendar where the event exists. Defaults to "primary".',
+              nullable: true,
+            ),
           },
           requiredProperties: ['event_id'],
         ),
       ),
       FunctionDeclaration(
         'update_event_tool',
-        'Updates an existing event in the Google Calendar without deleting it. Use this to change event time, color, summary, etc.',
+        'Updates metadata of an existing event (summary, location, description, color). Use reschedule_event_tool for changing times.',
         Schema(
           SchemaType.object,
           properties: {
@@ -1207,19 +1309,9 @@ class AgentService {
               description: 'New event title',
               nullable: true,
             ),
-            'start': Schema(
-              SchemaType.string,
-              description: 'New start time in ISO format',
-              nullable: true,
-            ),
-            'end': Schema(
-              SchemaType.string,
-              description: 'New end time in ISO format',
-              nullable: true,
-            ),
             'location': Schema(
               SchemaType.string,
-              description: 'New event location',
+              description: 'New location',
               nullable: true,
             ),
             'description': Schema(
@@ -1231,6 +1323,11 @@ class AgentService {
               SchemaType.string,
               description:
                   'New color name (lavender, sage, tomato, flamingo, banana, tangerine, peacock, graphite, blueberry, basil, grape)',
+              nullable: true,
+            ),
+            'calendar_id': Schema(
+              SchemaType.string,
+              description: 'The ID of the calendar where the event exists. Defaults to "primary".',
               nullable: true,
             ),
           },
