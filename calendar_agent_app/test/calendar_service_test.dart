@@ -27,10 +27,6 @@ void main() {
 
   group('CalendarService - _findFreeSlots', () {
     test('should identify gaps in a day with 15-minute buffer', () async {
-      final targetDate = DateTime(2024, 5, 1, 10, 0).toUtc();
-      final dayStart = DateTime(targetDate.year, targetDate.month, targetDate.day, 9, 0).toUtc();
-      final dayEnd = DateTime(targetDate.year, targetDate.month, targetDate.day, 19, 0).toUtc();
-      
       // Mock existing events: 10:00 - 11:00
       final existingEvent = Event()
         ..summary = 'Existing Meeting'
@@ -52,7 +48,7 @@ void main() {
       );
 
       expect(suggestions, contains('🚨 **CONFLICT DETECTED** 🚨'));
-      expect(suggestions, contains('Suggested Alternative Slots:'));
+      expect(suggestions, contains('Suggested Alternative Slots'));
       // Buffer is 15 mins. Day starts at 9:00. 
       // Slot 1: 09:00 - 10:00 (if duration is 1h)
       // The test doesn't specify duration in the call, but it's inferred from start/end.
@@ -67,8 +63,6 @@ void main() {
     });
 
     test('should scan up to 3 days if first day is full', () async {
-      final targetDate = DateTime(2024, 5, 1, 10, 0).toUtc();
-      
       // Mock day 1 as completely full (9:00 - 19:00)
       final fullDayEvent = Event()
         ..summary = 'Full Day'
@@ -125,7 +119,7 @@ void main() {
         singleEvents: any(named: 'singleEvents'),
       )).thenAnswer((_) async => Events()..items = [conflict]);
 
-      when(() => mockEventsResource.delete(any(), any())).thenAnswer((_) async => null);
+      when(() => mockEventsResource.delete(any(), any())).thenAnswer((_) async {});
       when(() => mockEventsResource.insert(any(), any())).thenAnswer((_) async => Event()..summary = 'New Event'..htmlLink = 'http/link');
 
       final result = await calendarService.createEvent(

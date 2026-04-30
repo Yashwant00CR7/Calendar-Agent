@@ -97,7 +97,7 @@ void main() {
   group('TaskService - deleteTask', () {
     test('should call delete on resource', () async {
       when(() => mockTasksResource.delete(any(), any()))
-          .thenAnswer((_) async => null);
+          .thenAnswer((_) async {});
 
       final result = await taskService.deleteTask('task_id');
 

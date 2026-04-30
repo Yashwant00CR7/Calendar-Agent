@@ -123,8 +123,9 @@ class AgentService {
       debugPrint("Agent Service Error: $e");
       final errorMsg = e.toString();
       if (errorMsg.contains('429')) throw RateLimitException();
-      if (errorMsg.contains('401') || errorMsg.contains('403'))
+      if (errorMsg.contains('401') || errorMsg.contains('403')) {
         throw InvalidCredentialsException();
+      }
       throw AgentBadRequestException("Service error: $e");
     }
 
@@ -592,7 +593,6 @@ class AgentService {
 
     int count = 0;
     for (final r in results) {
-      if (count >= 5) break;
       final title = r['title']?.toString() ?? 'Result ${count + 1}';
       final snippet = r['description']?.toString() ?? '';
       final link = r['url']?.toString() ?? '';
@@ -1036,7 +1036,7 @@ class AgentService {
           location: args['location']?.toString() ?? "",
           description: args['description']?.toString() ?? "",
           colorName: args['color_name']?.toString(),
-          calendarId: args['calendar_id']?.toString(),
+          calendarId: args['calendar_id']?.toString() ?? 'primary',
           attendeeEmails:
               args['attendee_emails'] != null
                    ? List<String>.from(args['attendee_emails'])
@@ -1049,21 +1049,22 @@ class AgentService {
         );
       case 'list_upcoming_events_tool':
         return await calendarService.listUpcomingEvents(
-          calendarId: args['calendar_id']?.toString(),
+          calendarId: args['calendar_id']?.toString() ?? 'primary',
         );
       case 'search_events_tool':
         return await calendarService.searchEvents(
           args['query'].toString(),
-          calendarId: args['calendar_id']?.toString(),
+          calendarId: args['calendar_id']?.toString() ?? 'primary',
         );
       case 'list_calendars_tool':
-        return await calendarService.listCalendars();
+        final calendars = await calendarService.listCalendars();
+        return calendars.map((c) => "${c['summary']} (ID: ${c['id']})").join("\n");
       case 'reschedule_event_tool':
         return await calendarService.updateEvent(
           args['event_id'].toString(),
           startStr: args['start'].toString(),
           endStr: args['end'].toString(),
-          calendarId: args['calendar_id']?.toString(),
+          calendarId: args['calendar_id']?.toString() ?? 'primary',
         );
       case 'update_event_tool':
         return await calendarService.updateEvent(
@@ -1072,12 +1073,12 @@ class AgentService {
           location: args['location']?.toString(),
           description: args['description']?.toString(),
           colorName: args['color_name']?.toString(),
-          calendarId: args['calendar_id']?.toString(),
+          calendarId: args['calendar_id']?.toString() ?? 'primary',
         );
       case 'delete_event_tool':
         return await calendarService.deleteEventById(
           args['event_id'].toString(),
-          calendarId: args['calendar_id']?.toString(),
+          calendarId: args['calendar_id']?.toString() ?? 'primary',
         );
       case 'save_to_personal_memory_tool':
         String contentToSave = args['content'].toString();
@@ -1509,8 +1510,9 @@ CLEAN FACT:''';
   }
 
   Future<String> takeContextSnapshot() async {
-    if (geminiApiKey == null || geminiApiKey!.trim().isEmpty)
+    if (geminiApiKey == null || geminiApiKey!.trim().isEmpty) {
       return "SKIPPED: No Gemini API Key for background task.";
+    }
 
     final prefs = await SharedPreferences.getInstance();
     final String rawHistory =

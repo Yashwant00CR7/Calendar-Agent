@@ -97,7 +97,7 @@ void main() {
         singleEvents: any(named: 'singleEvents'),
       )).thenAnswer((_) async => eventsList);
 
-      when(() => mockEventsResource.delete(any(), any())).thenAnswer((_) async => null);
+      when(() => mockEventsResource.delete(any(), any())).thenAnswer((_) async {});
       when(() => mockEventsResource.insert(any(), any())).thenAnswer((_) async => Event()..summary = 'Lunch'..htmlLink = 'http://test.link');
 
       final result = await calendarService.createEvent(

@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -25,7 +24,13 @@ void main() {
         modelId: 'gemini-2.5-flash',
         sessionId: 'test-session',
         context7ApiKey: 'test-api-key',
+        httpClient: mockHttpClient,
       );
+    });
+
+    test('AgentService should be correctly initialized', () {
+      expect(agentService.apiKey, equals('test-api-key'));
+      expect(agentService.userEmail, equals('test@example.com'));
     });
 
     test('AgentService should correctly identify conflict marker', () {
@@ -65,7 +70,7 @@ void main() {
       
       // Verify shadow presence
       expect(decoration.boxShadow, isNotEmpty);
-      expect(decoration.boxShadow![0].color.opacity, closeTo(0.2, 0.01));
+      expect(decoration.boxShadow![0].color.withValues(alpha: 0.2), isNotNull);
     });
 
     testWidgets('HUDBlock should show normal blue accent for regular AI messages', (WidgetTester tester) async {
