@@ -1,3 +1,4 @@
+# Project Specific
 calendar-ai
 **/__pycache__
 .env
@@ -11,9 +12,6 @@ users.db
 .idea/
 *.iml
 *.log
-
-# Old Python Backend Archive
-archive/
 
 # Flutter Build Artifacts & Generated Folders
 calendar_agent_app/.dart_tool/
@@ -29,13 +27,20 @@ calendar_agent_app/ios/Flutter/ephemeral/
 calendar_agent_app/linux/flutter/ephemeral/
 calendar_agent_app/macos/Flutter/ephemeral/
 calendar_agent_app/windows/flutter/ephemeral/
-.claude 
 
-# JVM crash/replay logs from Android/Gradle runs
+# Java/Android Heap Dumps & Crash Logs
+*.hprof
+calendar_agent_app/android/*.hprof
 calendar_agent_app/android/hs_err_pid*.log
 calendar_agent_app/android/replay_pid*.log
 
-# Optional: keep built artifacts you explicitly copy here for sharing/releases
+# Agent Logs & Recordings
+.gemini/
+.antigravity/
+.antigravity-scratch/
+.claude/
+
+# Releases
 !releases/
 !releases/*.apk
 !releases/*.aab

@@ -15,12 +15,12 @@ void main() {
     await tester.pumpWidget(const CalendarAgentApp());
 
     // Verify that our app starts with the correct title on LandingScreen.
-    expect(find.text('Calendar AI'), findsOneWidget);
+    expect(find.text('CALENDAR AI'), findsOneWidget);
 
     // Verify that the subtitle is visible.
-    expect(find.text('Your Personal Agentic Scheduler'), findsOneWidget);
+    expect(find.text('The Future of Scheduling'), findsOneWidget);
 
     // Verify the Google sign-in button text.
-    expect(find.text('Continue with Google'), findsOneWidget);
+    expect(find.text('CONTINUE WITH GOOGLE'), findsOneWidget);
   });
 }

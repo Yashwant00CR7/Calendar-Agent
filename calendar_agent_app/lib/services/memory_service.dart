@@ -154,19 +154,6 @@ class MemoryService {
     return text;
   }
 
-  static double _cosineSimilarity(List<double> a, List<double> b) {
-    if (a.length != b.length) return 0.0;
-    double dotProduct = 0.0;
-    double normA = 0.0;
-    double normB = 0.0;
-    for (int i = 0; i < a.length; i++) {
-      dotProduct += a[i] * b[i];
-      normA += a[i] * a[i];
-      normB += b[i] * b[i];
-    }
-    if (normA == 0 || normB == 0) return 0.0;
-    return dotProduct / (sqrt(normA) * sqrt(normB));
-  }
 
   static List<String> _chunkText(String text) {
     // Simple splitting by sentence or double newlines
@@ -234,6 +221,26 @@ class MemoryService {
     );
   }
 
+  static Future<int> updateMemory(int id, String newContent) async {
+    final db = await database;
+    return await db.update(
+      tableName,
+      {'content': newContent},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  static Future<int> clearAllMemories(String userId) async {
+    final db = await database;
+    final normalizedUserId = userId.trim().toLowerCase();
+    return await db.delete(
+      tableName,
+      where: 'user_id = ?',
+      whereArgs: [normalizedUserId],
+    );
+  }
+
   static Future<String> queryMemory(
       String userId, String query, String apiKey) async {
     final db = await database;
@@ -251,17 +258,11 @@ class MemoryService {
         return "NO MEMORY RECALLED: You haven't asked me to remember anything yet.";
       }
 
-      List<Map<String, dynamic>> scoredMemories = [];
-      for (var map in maps) {
-        List<dynamic> jsonList = jsonDecode(map['embedding_json']);
-        List<double> embedding =
-            jsonList.map((e) => (e as num).toDouble()).toList();
-        double score = _cosineSimilarity(queryEmbedding, embedding);
-        scoredMemories.add({
-          'content': map['content'],
-          'score': score,
-        });
-      }
+      // OPTIMIZATION: Offload scoring to background isolate
+      final scoredMemories = await compute(_scoreMemoriesInIsolate, {
+        'queryEmbedding': queryEmbedding,
+        'maps': maps,
+      });
 
       scoredMemories
           .sort((a, b) => (b['score'] as double).compareTo(a['score'] as double));
@@ -288,6 +289,43 @@ class MemoryService {
       }
       return "Memory search failed: $e";
     }
+  }
+
+  /// Helper for Isolate-based scoring
+  static List<Map<String, dynamic>> _scoreMemoriesInIsolate(Map<String, dynamic> params) {
+    final List<double> queryEmbedding = params['queryEmbedding'];
+    final List<Map<String, dynamic>> maps = params['maps'];
+    
+    List<Map<String, dynamic>> scored = [];
+    for (var map in maps) {
+      try {
+        final List<dynamic> jsonList = jsonDecode(map['embedding_json']);
+        final List<double> embedding = jsonList.map((e) => (e as num).toDouble()).toList();
+        
+        // Manual cosine similarity inline for performance in isolate
+        if (queryEmbedding.length != embedding.length) continue;
+        
+        double dotProduct = 0.0;
+        double normA = 0.0;
+        double normB = 0.0;
+        for (int i = 0; i < queryEmbedding.length; i++) {
+          dotProduct += queryEmbedding[i] * embedding[i];
+          normA += queryEmbedding[i] * queryEmbedding[i];
+          normB += embedding[i] * embedding[i];
+        }
+        
+        if (normA == 0 || normB == 0) continue;
+        double score = dotProduct / (sqrt(normA) * sqrt(normB));
+        
+        scored.add({
+          'content': map['content'],
+          'score': score,
+        });
+      } catch (_) {
+        continue;
+      }
+    }
+    return scored;
   }
 
   static Future<int> clearLegacyMemories(String userId) async {

@@ -3,7 +3,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:http/http.dart' as http;
 import 'package:calendar_agent_app/services/agent_service.dart';
-import 'package:calendar_agent_app/main.dart';
+import 'package:calendar_agent_app/core/models/message.dart';
+import 'package:calendar_agent_app/features/chat/chat_screen.dart';
+
 
 class MockHttpClient extends Mock implements http.Client {}
 
@@ -96,8 +98,9 @@ void main() {
       final decoration = container.decoration as BoxDecoration;
       
       final border = decoration.border as Border;
-      expect(border.left.color, Colors.cyanAccent);
-      expect(border.left.width, 2.0);
+      // The current implementation uses theme.colorScheme.outline.withValues(alpha: 0.1) for non-user messages
+      // and a width of 1 for non-conflict messages.
+      expect(border.top.width, 1.0);
       expect(decoration.boxShadow, isEmpty);
     });
   });

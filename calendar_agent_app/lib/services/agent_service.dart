@@ -10,7 +10,7 @@ import 'calendar_service.dart';
 import 'task_service.dart';
 import 'memory_service.dart';
 
-enum LLMProvider { gemini, groq, openrouter }
+enum LLMProvider { gemini, groq, openrouter, nvidia }
 
 /// Custom exceptions for Error Liveliness to bubble up to UI global status
 abstract class AgentApiException implements Exception {
@@ -49,6 +49,11 @@ class AgentService {
   final String sessionId;
   final String? tavilyApiKey;
   final String? context7ApiKey;
+  final String? googleMapsApiKey;
+  
+  // Track currently uploaded file for tool access
+  Uint8List? _currentFileBytes;
+  String? _currentMimeType;
   
   // Injectable dependencies for testing
   CalendarService? _calendarService;
@@ -61,6 +66,7 @@ class AgentService {
     this.geminiApiKey,
     this.tavilyApiKey,
     this.context7ApiKey,
+    this.googleMapsApiKey,
     required String userEmail,
     required this.modelId,
     required this.sessionId,
@@ -78,6 +84,10 @@ class AgentService {
     Uint8List? fileBytes,
     String? mimeType,
   ]) async {
+    // Set current file for tool access
+    _currentFileBytes = fileBytes;
+    _currentMimeType = mimeType;
+
     // Session-based history handling
     final prefs = await SharedPreferences.getInstance();
     final String rawHistory =
@@ -839,7 +849,9 @@ class AgentService {
     String baseUrl =
         provider == LLMProvider.groq
             ? "https://api.groq.com/openai/v1"
-            : "https://openrouter.ai/api/v1";
+            : provider == LLMProvider.nvidia
+                ? "https://integrate.api.nvidia.com/v1"
+                : "https://openrouter.ai/api/v1";
 
     _calendarService ??= await CalendarService.create(googleSignIn);
     _taskService ??= await TaskService.create(googleSignIn);
@@ -985,7 +997,8 @@ class AgentService {
       );
     }
 
-    return response.text ?? "Task completed successfully.";
+    final finalMsg = response.text ?? "";
+    return finalMsg.trim().isEmpty ? "Task completed successfully." : finalMsg;
   }
 
   Future<List<Content>> _mapHistoryToGemini(List<dynamic> historyList) async {
@@ -1097,6 +1110,8 @@ class AgentService {
             'refined_at': DateTime.now().toIso8601String(),
           },
         );
+      case 'analyze_document_vision_tool':
+        return await _analyzeDocumentWithVision(args['focus_area']?.toString());
       case 'query_personal_memory_tool':
         return await MemoryService.queryMemory(
           userEmail,
@@ -1109,6 +1124,12 @@ class AgentService {
         return await _executeContext7(
           args['query'].toString(),
           args['library_id']?.toString(),
+        );
+      case 'get_travel_time_tool':
+        return await _getTravelTime(
+          args['origin'].toString(),
+          args['destination'].toString(),
+          args['mode']?.toString() ?? 'driving',
         );
       case 'list_tasks_tool':
         return await taskService.listTasks();
@@ -1135,6 +1156,7 @@ class AgentService {
 - **Web Search First for Unknown Facts**: If the user asks about real-time information, current events, schedules, news, scores, weather, sports fixtures, upcoming dates, or anything beyond your training data — you MUST call `web_search_tool` BEFORE answering. NEVER refuse a factual query by saying "I don't have access to that information" or "this is too far in the future." You have a web search tool — USE IT. If the search returns results, synthesize them. If it fails, tell the user the search failed and suggest they try again.
 - **Technical Documentation**: For coding/library questions, prefer `context7_tool` to fetch live documentation. Explicitly extract the library name (e.g., "Next.js", "React", "Prisma") to provide as context.
 - **Proactive Scheduling & Conflict Resolution**: Parse documents (Images/PDFs) to identify "Single Events" vs "Timetables". If a conflict is detected when scheduling, **proactively offer the alternative free slots** provided by the tool. Do not wait for the user to ask "when am I free?".
+- **Multi-Modal Memory**: If an image is uploaded, ALWAYS call `analyze_document_vision_tool` if you detect durable facts (schedules, contacts, personal notes) that should be remembered beyond the current session.
 - **Task Management**: You can also list, create, complete, and delete tasks. Do not confuse tasks with events.
 - **Conflict Vigilance**: Always call `list_upcoming_events_tool` before scheduling any new events.
 - **Recurring Events**: If the user mentions "every [day]", "weekly", "monthly", or any repeating pattern, use the `rrule` parameter in `schedule_event_tool`. You are responsible for generating the correct RRULE string (e.g., "RRULE:FREQ=WEEKLY;BYDAY=MO,WE").
@@ -1456,7 +1478,146 @@ class AgentService {
           requiredProperties: ['task_id'],
         ),
       ),
+      FunctionDeclaration(
+        'analyze_document_vision_tool',
+        'Analyzes the CURRENTLY UPLOADED image to extract and save important facts, schedules, or notes into the long-term memory vault.',
+        Schema(
+          SchemaType.object,
+          properties: {
+            'focus_area': Schema(
+              SchemaType.string,
+              description: 'Optional hint on what to look for (e.g., "schedules", "phone numbers", "meeting notes").',
+              nullable: true,
+            ),
+          },
+        ),
+      ),
+      FunctionDeclaration(
+        'get_travel_time_tool',
+        'Calculates the travel time and distance between two locations using Google Maps.',
+        Schema(
+          SchemaType.object,
+          properties: {
+            'origin': Schema(SchemaType.string, description: 'Starting location'),
+            'destination': Schema(SchemaType.string, description: 'Ending location'),
+            'mode': Schema(
+              SchemaType.string,
+              description: 'Travel mode (driving, walking, bicycling, transit)',
+              nullable: true,
+            ),
+          },
+          requiredProperties: ['origin', 'destination'],
+        ),
+      ),
     ];
+  }
+
+  Future<String> _getTravelTime(String origin, String destination, String mode) async {
+    if (googleMapsApiKey == null || googleMapsApiKey!.trim().isEmpty) {
+      return "Error: Google Maps API Key is missing. Please configure it in settings.";
+    }
+
+    try {
+      final url = Uri.parse(
+        'https://maps.googleapis.com/maps/api/distancematrix/json'
+        '?origins=${Uri.encodeComponent(origin)}'
+        '&destinations=${Uri.encodeComponent(destination)}'
+        '&mode=$mode'
+        '&key=$googleMapsApiKey'
+      );
+
+      final response = await _httpClient.get(url);
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['status'] == 'OK') {
+          final element = data['rows'][0]['elements'][0];
+          if (element['status'] == 'OK') {
+            final duration = element['duration']['text'];
+            final distance = element['distance']['text'];
+            return "Travel time from $origin to $destination ($mode) is $duration ($distance).";
+          } else {
+            return "Could not calculate distance: ${element['status']}";
+          }
+        } else {
+          return "Google Maps API Error: ${data['status']} - ${data['error_message'] ?? 'No message'}";
+        }
+      } else {
+        return "Failed to connect to Google Maps API (Status: ${response.statusCode})";
+      }
+    } catch (e) {
+      return "Error calculating travel time: $e";
+    }
+  }
+
+  Future<String> _analyzeDocumentWithVision(String? focusArea) async {
+    if (_currentFileBytes == null || _currentMimeType == null) {
+      return "Error: No file uploaded to analyze. Please upload an image first.";
+    }
+
+    if (geminiApiKey == null || geminiApiKey!.trim().isEmpty) {
+      return "Error: Gemini API Key is required for vision analysis.";
+    }
+
+    try {
+      final model = GenerativeModel(
+        model: 'gemini-2.0-flash', // Use latest vision-capable model
+        apiKey: geminiApiKey!,
+      );
+
+      final prompt = '''
+VISION ANALYSIS TASK:
+Extract all significant, durable facts from this image that should be remembered for long-term personal context.
+Focus Area Hint: ${focusArea ?? "General (Schedules, Contacts, Notes, Preferences)"}
+
+RULES:
+- Identify individual events, contacts, recurring schedules, or personal preferences.
+- Format each as an atomic, declarative sentence.
+- If a schedule is found, extract dates and times clearly.
+- Output ONLY the list of facts, one per line, starting with a dash (-).
+- If no significant facts are found, output 'NONE'.
+''';
+
+      final content = [
+        Content.multi([
+          TextPart(prompt),
+          DataPart(_currentMimeType!, _currentFileBytes!),
+        ])
+      ];
+
+      final response = await model.generateContent(content);
+      final result = response.text?.trim() ?? "NONE";
+
+      if (result == "NONE" || result.isEmpty) {
+        return "Vision analysis complete: No significant facts extracted.";
+      }
+
+      final facts = result
+          .split('\n')
+          .where((l) => l.trim().startsWith('-'))
+          .map((l) => l.replaceFirst('-', '').trim())
+          .toList();
+
+      int savedCount = 0;
+      for (final fact in facts) {
+        await MemoryService.indexDocument(
+          userEmail,
+          fact,
+          geminiApiKey!,
+          sourceType: 'Document',
+          metadata: {
+            'analysis_type': 'vision',
+            'focus_area': focusArea,
+            'mime_type': _currentMimeType,
+          },
+        );
+        savedCount++;
+      }
+
+      return "Vision analysis complete: $savedCount facts extracted and saved to memory vault.";
+    } catch (e) {
+      debugPrint("Vision Analysis Error: $e");
+      return "Error during vision analysis: $e";
+    }
   }
 
   Future<String> _refineMemoryContent(String content) async {
